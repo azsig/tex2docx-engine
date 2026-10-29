@@ -34,7 +34,8 @@ def _run(cmd, cwd):
 
 
 def _ensure_pdf(workdir, main):
-    """PDF = oracle; butuh >= 2 run pdflatex agar .toc/.lot/.lof terisi."""
+    """PDF = oracle; butuh >= 2 run pdflatex agar .toc/.lot/.lof terisi.
+    Bila ada .bib (dan .bbl belum ada), jalankan bibtex di antaranya."""
     pdf = os.path.join(workdir, f'{main}.pdf')
     tex = os.path.join(workdir, f'{main}.tex')
     if os.path.isfile(pdf):
@@ -42,6 +43,12 @@ def _ensure_pdf(workdir, main):
     if not os.path.isfile(tex):
         raise SystemExit(f'[pipeline] {tex} tidak ada')
     pdflatex = _need('pdflatex')
+    _run([pdflatex, '-interaction=nonstopmode', f'{main}.tex'], workdir)
+    if not os.path.isfile(os.path.join(workdir, f'{main}.bbl')):
+        for bib in ('{m}.bib'.format(m=main), 'references.bib'):
+            if os.path.isfile(os.path.join(workdir, bib)):
+                _run([_need('bibtex'), main], workdir)
+                break
     for _ in range(2):
         _run([pdflatex, '-interaction=nonstopmode', f'{main}.tex'], workdir)
     if not os.path.isfile(pdf):
