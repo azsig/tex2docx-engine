@@ -55,7 +55,8 @@ def convert(workdir, main='main', out=None, font='Times New Roman',
     dikompilasi). Mengembalikan path DOCX final."""
     workdir = os.path.abspath(workdir)
     out = os.path.abspath(out) if out else os.path.join(workdir, f'{main}_engine.docx')
-    tmp = os.path.join(workdir, f'.{main}_tex2docx_tmp')
+    flat = main.replace('/', '_').replace('\\', '_')      # main boleh 'bab/main'
+    tmp = os.path.join(workdir, f'.{flat}_tex2docx_tmp')
     os.makedirs(tmp, exist_ok=True)
     try:
         return _convert(workdir, main, out, font, tmp, keep)
