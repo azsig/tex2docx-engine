@@ -1,0 +1,46 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\title{Engine Smoke Test}
+\author{Alpha One \\ 22/123456/XX/99999}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+{\large\bfseries SMOKE TEST DOCUMENT}
+
+\vspace{0.5cm}
+
+by Alpha One
+\end{center}
+
+\begin{abstract}
+This document exercises the pipeline: centering, vertical space, first-line
+indents and a table. It is intentionally small so the test stays fast while
+still producing a multi-featured PDF for the layout oracle to measure.
+\end{abstract}
+
+\section{Introduction}
+Body text with a first-line indent follows the heading. The oracle should
+measure the vertical gap above this section heading and transplant it into
+the DOCX as paragraph spacing, purely from PDF geometry.
+
+\subsection{Sub}
+More body text. Justified paragraphs whose lines start at the margin must not
+be mistaken for centered blocks.
+
+\section{Data}
+\begin{center}
+\begin{tabular}{l c}
+\hline
+A & 1 \\
+B & 2 \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{Conclusion}
+It works.
+
+\end{document}
