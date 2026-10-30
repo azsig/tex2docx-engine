@@ -227,6 +227,13 @@ def run(SRC, DST):
                 state['vs'] = []
                 state['brk'] = False
                 # align TIDAK direset: scope berlaku sampai t2dalign:end
+            elif (el.tag in CONTAINER_TAGS and state['align']):
+                # env \begin{center}/quote -> text:section; scope align
+                # membungkus section -> perataan berlaku ke paragraf di
+                # dalamnya (container tak menerima style paragraf sendiri).
+                for p in el.iter(f'{{{TEXT_NS}}}p'):
+                    reg.apply(p, {'text-align': state['align']})
+                    stats['align'] += 1
             # container (section/TOC) & table & frame: tidak konsumsi pending
             continue
         # komentar top-level = marker antar blok
@@ -265,32 +272,44 @@ def run(SRC, DST):
                 stats['hardened'] += 1
 
     # ---- lapis lama: bungkus inline yatim ----
+    # Sekarang juga DI DALAM text:section: env center/quote jalur tex4ht
+    # menjadi section berisi <text:p begin-env-p/> + SPAN YATIM + <text:p
+    # end-env-p/> — section harus berisi blok (ODDF), tanpa dibungkus
+    # LibreOffice membuang span-nya saat export DOCX.
     n_wrapped = 0
-    runs, kinds = [], set()
+    kinds = set()
 
-    def flush(next_block):
+    def wrap_orphans(container):
         nonlocal n_wrapped
-        if not runs:
-            return
-        for el in runs:
-            kinds.add(el.tag.split('}')[-1])
-            office_text.remove(el)
-        p = ET.Element(f'{{{TEXT_NS}}}p')
-        for el in runs:
-            p.append(el)
-        if next_block is not None:
-            office_text.insert(list(office_text).index(next_block), p)
-        else:
-            office_text.append(p)
-        n_wrapped += len(runs)
-        runs.clear()
+        runs = []
 
-    for el in list(office_text):
-        if el.tag in BLOCK_TAGS:
-            flush(el)
-        else:
-            runs.append(el)
-    flush(None)
+        def flush(next_block):
+            nonlocal n_wrapped
+            if not runs:
+                return
+            for el in runs:
+                kinds.add(el.tag.split('}')[-1])
+                container.remove(el)
+            p = ET.Element(f'{{{TEXT_NS}}}p')
+            for el in runs:
+                p.append(el)
+            if next_block is not None:
+                container.insert(list(container).index(next_block), p)
+            else:
+                container.append(p)
+            n_wrapped += len(runs)
+            runs.clear()
+
+        for el in list(container):
+            if el.tag in BLOCK_TAGS:
+                flush(el)
+            else:
+                runs.append(el)
+        flush(None)
+
+    wrap_orphans(office_text)
+    for sec in list(root.iter(f'{{{TEXT_NS}}}section')):
+        wrap_orphans(sec)
 
     data = {n: zin.read(n) for n in zin.namelist()}
     zin.close()
