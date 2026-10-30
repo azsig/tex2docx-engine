@@ -28,3 +28,6 @@ tex2docx = "tex2docx_engine.pipeline:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+tex2docx_engine = ["*.cfg"]
