@@ -13,9 +13,17 @@ dicocokkan ke paragraf DOCX dan diberi page-break.
   ke rangkaian itu. Baris nama/NIM tanda tangan bukan judul section → tidak dilewati.
 - ALIGNMENT oracle: tex4ht hanya meneruskan \\begin{center} (jadi style 'center');
   deklarasi \\centering di dalam env (intisari/abstract) HILANG di konversi. Maka
-  perataan dibaca dari GEOMETRI baris PDF — hasil eksekusi command apa pun
-  (\\centering, \\begin{center}, \\hfill, macro custom): blok rata tengah = tepi kiri
-  baris bervariasi & titik tengah mengelompok. Bebas bahasa, bebas .cls, bebas kata.
+  perataan dibaca dari GEOMETRI baris PDF dalam SATUAN TITIK (pdftotext -bbox) —
+  grid sel -layout skalanya bergantung ukuran font sehingga judul ber-font besar
+  'salah pusat' versi sel padahal fisiknya rata tengah persis. Blok rata tengah =
+  titik tengah baris mengelompok & tepi kiri menjauh dari margin; baris ber-celah
+  antar-kata lebar (kolom tabel / nomor entri daftar di kanan) memisah blok, jadi
+  judul di atas tabel tetap jadi blok sendiri. Bebas bahasa, bebas .cls, bebas kata.
+- WEIGHT oracle: bold judul dibaca dari NAMA FONT pdftohtml -xml (weight ada di
+  nama PostScript: NimbusRomNo9L-Medi = bold-nya Times URW, *-Bold, CMBX*) —
+  mapping style make4ht→docx kerap menjatuhkan bold judul. Bold ditanam pada
+  paragraf yang terbukti rata tengah + cocok teksnya (>=60% lebar teks ber-font
+  bold).
 - VERTICAL-SPACE oracle: \\vskip/\\vspace/\\parskip juga HILANG (LibreOffice menulis
   w:before="0" literal di semua paragraf). Jarak vertikal diukur dari koordinat-y
   pdftotext -bbox: rata baris normal halaman = median jarak antar-baris; selisih
@@ -182,12 +190,78 @@ def run(PDF, SRC, DST, TOC=""):
                 n_mid += 1
         cursor = target
 
-    # ---------- 4. ALIGNMENT oracle (geometri baris PDF) ----------
+    # ---------- 4. ALIGNMENT + WEIGHT oracle (geometri baris PDF, satuan TITIK) ----------
+    # Grid sel pdftotext -layout skalanya per-ukuran-font (judul ber-font besar =
+    # sel lebih lebar) sehingga 'pusat' versi sel menyesatkan: judul DAFTAR TABEL
+    # fisiknya rata tengah persis tapi mid-nya jauh dari pusat versi sel. Maka
+    # perataan & pemisah tabel diukur di koordinat TITIK xMin/xMax (-bbox) yang
+    # bebas skala. Dipakai juga oracle jarak vertikal (bagian 5).
+    bbox = subprocess.run(['pdftotext', '-bbox', PDF, '-'],
+                          capture_output=True, text=True, check=True).stdout
+    bpages, page_w = [], []
+    for chunk in re.split(r'<page ', bbox)[1:]:
+        page_w.append(float(re.match(r'width="([\d.]+)"', chunk).group(1)))
+        ws = re.findall(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" '
+                        r'yMax="([\d.]+)">([^<]*)</word>', chunk)
+        # Baris = kata dengan overlap vertikal >= 40% tinggi yang lebih pendek.
+        # (Ambang selisih-y tetap menghancurkan baris ber-font campur: kata italic
+        # di tengah teks regular punya yMin beda ~3.5pt dan terlempar jadi 'baris'
+        # sendiri — menimbulkan lubang gap palsu di tengah paragraf.)
+        words = sorted(((float(a), float(b), float(c), float(d), e)
+                        for a, b, c, d, e in ws), key=lambda t: (t[1], t[0]))
+        lines = []
+        for x0, y0, x1, y1, w in words:
+            if lines:
+                L = lines[-1]
+                ov = min(L['y1'], y1) - max(L['y0'], y0)
+                if ov > 0.4 * min(L['y1'] - L['y0'], y1 - y0):
+                    L['words'].append((x0, x1, w))
+                    L['y0'] = min(L['y0'], y0)
+                    L['y1'] = max(L['y1'], y1)
+                    continue
+            lines.append({'y0': y0, 'y1': y1, 'words': [(x0, x1, w)]})
+        for L in lines:                       # urut baca + gap antar-kata nyata
+            wsx = sorted(L['words'])
+            L['x0'], L['x1'] = wsx[0][0], wsx[-1][1]
+            L['t'] = ' '.join(w for _, _, w in wsx)
+            L['gap'] = max((b[0] - a[1] for a, b in zip(wsx, wsx[1:])), default=0.0)
+        bpages.append(lines)
+
+    # FONT oracle (pdftohtml -xml): weight bold ada di NAMA PostScript font yang
+    # dipakai pdflatex menggambar baris — NimbusRomNo9L-Medi (Times-Bold URW),
+    # LMRoman*-Bold, CMBX*. Mapping style make4ht->docx kerap menjatuhkan bold
+    # judul; bold ditanam ulang dari bukti font PDF. Bebas kata.
+    def font_is_bold(family):
+        fam = re.sub(r'^[A-Z]{6}\+', '', family)    # buang prefix subset 'HRVNZZ+'
+        return bool(re.search(r'(?:^|-)(?:medi(?:um)?|bold|semibold|demibold|'
+                              r'extrabold|black|heavy)(?:$|-)|^cm(?:bx|bs)', fam, re.I))
+
+    fpages = []                                     # per halaman: [(y_pt, lebar_pt, bold)]
+    fonts = {}
+    try:
+        hxml = subprocess.run(['pdftohtml', '-xml', '-i', '-stdout', PDF],
+                              capture_output=True, text=True, check=True).stdout
+        for pno, chunk in enumerate(re.split(r'<page ', hxml)[1:]):
+            if pno >= len(page_w):
+                break
+            scale = float(re.search(r'width="([\d.]+)"', chunk).group(1)) / page_w[pno]
+            # id font GLOBAL: <fontspec> hanya dicetak pada halaman pertama
+            # kemunculannya — akumulasi lintas halaman, jangan reset per chunk
+            for i, f in re.findall(r'<fontspec id="(\d+)"[^>]*family="([^"]*)"',
+                                   chunk):
+                fonts[int(i)] = font_is_bold(f)
+            fpages.append([(float(m.group(1)) / scale, float(m.group(2)) / scale,
+                            fonts.get(int(m.group(3)), False))
+                           for m in re.finditer(r'<text top="([\d.]+)" left="[\d.]+" '
+                                                r'width="([\d.]+)" height="[\d.]+" '
+                                                r'font="(\d+)"', chunk)])
+    except Exception:
+        fpages = []
+
     # \centering/\begin{center}/\hfill/macro apa pun dieksekusi engine -> baris hasilnya
-    # rata tengah SECARA GEOMETRIS. Blok = baris konten berurutan (baris kosong/chrome
-    # memisah). Rata tengah: semua tepi kiri menjauh dari margin + titik tengah baris
-    # mengelompok (multi-baris) / dekat pusat teks halaman (satu baris). Baris dengan
-    # gap spasi lebar = tabel/tabulasi, bukan teks — dilewati.
+    # rata tengah SECARA GEOMETRIS (titik). Blok = baris konten berurutan; baris
+    # 'tabel/tab' (celah antar-kata >= 40pt: kolom tabel, nomor entri daftar di
+    # kanan) MEMISAH blok — judul tepat di atas tabel tetap jadi blok sendiri.
     def set_center(raw):
         if '<w:numPr>' in raw or 'w:val="center"' in raw:
             return raw, False
@@ -201,100 +275,186 @@ def run(PDF, SRC, DST, TOC=""):
         pos = m.start() if m else raw.find('</w:pPr>')
         return raw[:pos] + jc + raw[pos:], True
 
-    n_center = 0
+    def set_bold(raw):
+        """<w:b/> ke semua run paragraf (weight font PDF terbukti bold)."""
+        cnt = [0]
+
+        def repl(m):
+            r = m.group(0)
+            if '<w:b/>' in r:
+                return r
+            g = re.search(r'<w:rPr>(<w:rFonts[^>]*/>)?', r)
+            if g:
+                cnt[0] += 1
+                return r[:g.end()] + '<w:b/>' + r[g.end():]
+            g = re.match(r'<w:r\b[^>]*>', r)
+            cnt[0] += 1
+            return r[:g.end()] + '<w:rPr><w:b/></w:rPr>' + r[g.end():]
+
+        new = re.sub(r'<w:r\b[^>]*>(?:(?!</w:r>).)*</w:r>', repl, raw, flags=re.S)
+        return new, cnt[0] > 0
+
+    def block_bold(pno, sb):
+        """Rasio lebar teks ber-font bold pada blok (koordinat pdftohtml -> bbox)."""
+        if pno >= len(fpages) or not fpages[pno]:
+            return 0.0
+        lo = min(L['y0'] for L in sb) - 6
+        hi = max(L['y0'] for L in sb) + 6
+        tot = bold = 0.0
+        for top, width, isb in fpages[pno]:
+            if lo <= top <= hi:
+                tot += width
+                bold += width if isb else 0.0
+        return bold / tot if tot else 0.0
+
+    n_center = n_bold = 0
     centered_log = []
     acur = 0
-    for pno in range(total):
+    # kolom teks GLOBAL (median antar halaman): margin per-halaman dari min/max
+    # baris konten mudah bias — halaman daftar/tabel punya entri sampai ke kanan
+    # sehingga pusatnya bergeser dan judulnya sendiri tampak 'tidak di tengah'.
+    # Halaman badan dominan, mediannya stabil.
+    page_cols = [((lambda cl, cr: ((cl + cr) / 2, cr - cl))(
+        min(L['x0'] for L in c), max(L['x1'] for L in c)))
+        for c in ([L for L in ln if not is_chrome(L['t'])] for ln in bpages)
+        if len(c) >= 3]
+    page_cols.sort()
+    if page_cols:
+        col_c, col_w = page_cols[len(page_cols) // 2]
+    else:
+        col_c, col_w = 0.0, 1.0
+    col_l = col_c - col_w / 2
+    for pno, lines in enumerate(bpages):
+        content = [L for L in lines if not is_chrome(L['t'])]
+        if not content:
+            continue
         blocks, cur = [], []
-        for l in pages[pno].split('\n'):
-            if l.strip() and not is_chrome(l):
-                cur.append(l)
-            elif cur:
-                blocks.append(cur)
+        for L in content:
+            if L['gap'] >= 40:                      # tabel/tab: akhiri blok, buang baris
+                if cur:
+                    blocks.append(cur)
                 cur = []
+                continue
+            cur.append(L)
         if cur:
             blocks.append(cur)
-        if not blocks:
-            continue
-        allcols = [(len(l) - len(l.lstrip()), len(l.rstrip()) - 1)
-                   for blk in blocks for l in blk]
-        page_right = max(r for _, r in allcols)
-        fulls = sorted((l + r) / 2 for l, r in allcols if l <= 3 and r >= page_right - 3)
-        page_center = fulls[len(fulls) // 2] if fulls else None
         for blk in blocks:
-            if any(re.search(r'\S\s{3,}\S', l) for l in blk):
-                continue                       # tabulasi/tabel, bukan blok teks
-            # Kolom pdftotext relatif terhadap font TIAP BARIS: judul ber-font besar
-            # yang fisiknya rata tengah punya skala kolom sendiri (mid ~23 vs teks
-            # 12pt ~41). Maka blok dipecah pada: lonjakan mid antar baris (ganti
-            # ukuran font) atau baris drastis pendek yang diikuti baris lebar
-            # (judul ↔ oleh, heading ↔ isi paragraf).
+            # pecah sub-blok pada lonjakan mid (ganti kelompok perataan); baris
+            # pendek yang diikuti jauh lebih lebar (judul DAFTAR GAMBAR <- entri
+            # ber-leader); atau baris lebar yang diikuti baris pendek (blok surat
+            # -> judul INTISARI). Kelompok perataan berganti di kedua arah.
             subs, sub, pm, pw = [], [], None, None
-            for l in blk:
-                left = len(l) - len(l.lstrip())
-                w = len(l.strip())
-                mid = left + (w - 1) / 2
-                if sub and ((pm is not None and abs(mid - pm) > 10) or
-                            (pw is not None and pw < 20 and w > pw * 2.5)):
+            for L in blk:
+                w = L['x1'] - L['x0']
+                mid = (L['x0'] + L['x1']) / 2
+                if sub and ((pm is not None and abs(mid - pm) > 12) or
+                            (pw is not None and pw < 0.45 * col_w and w > 1.8 * pw) or
+                            (pw is not None and pw > 0.4 * col_w and w < 0.4 * col_w) or
+                            (pw is not None and w < 0.45 * pw and w < 0.15 * col_w)):
                     subs.append(sub)
                     sub = []
-                sub.append(l)
+                sub.append(L)
                 pm, pw = mid, w
             if sub:
                 subs.append(sub)
-            for sb in subs:
-                lefts = [len(l) - len(l.lstrip()) for l in sb]
-                mids = [lf + (len(l.strip()) - 1) / 2 for l, lf in zip(sb, lefts)]
+            for si, sb in enumerate(subs):
+                lefts = [L['x0'] - col_l for L in sb]
+                mids = [(L['x0'] + L['x1']) / 2 for L in sb]
                 med = sorted(mids)[len(mids) // 2]
                 dev = max(abs(m - med) for m in mids)
                 var = max(lefts) - min(lefts)
-                maxw = max(len(l.strip()) for l in sb)
-                if dev > 2.5:
-                    continue                   # titik tengah baris tidak mengelompok
+                maxw = max(L['x1'] - L['x0'] for L in sb)
+                if dev > 4:
+                    continue               # titik tengah tidak mengelompok (justify dsb.)
                 if len(sb) == 1:
-                    # baris tunggal harus SEMPIT & di pusat (judul/oleh/caption);
-                    # baris paragraf ber-indent juga mid-nya di pusat tapi lebarnya
-                    # ~lebar kolom
-                    if (lefts[0] <= 1 or page_center is None
-                            or abs(mids[0] - page_center) > 4 or maxw > page_right * 0.6):
+                    # baris tunggal harus SEMPIT & di pusat kolom. Baris rata
+                    # tengah mustahil MULAI di dekat margin (x0 >= pusat - w/2),
+                    # maka baris terakhir pendek paragraf rata-kiri yang kebetulan
+                    # berakhir di pusat ditolak oleh syarat tepi kirinya.
+                    if (maxw > 0.7 * col_w or abs(mids[0] - col_c) > 6
+                            or lefts[0] < 0.12 * col_w):
                         continue
                 else:
-                    # blok dengan baris di margin (baris lanjutan paragraf, L=0) hanya
-                    # boleh bila pergeserannya JAUH (>=10): pergeseran parindent
-                    # paragraf justify hanya 7-8 kolom, sedangkan baris pendek rata
-                    # tengah bergeser jauh dari margin
-                    if min(lefts) == 0 and var < 10:
+                    # blok ~ selebar kolom (>= 0.85 kolom) biasanya paragraf
+                    # justify yang kebetulan mid-nya seimbang — tapi judul panjang
+                    # yang benar-benar center presisi (mid == pusat kolom ±3pt di
+                    # SEMUA barisnya) tetap boleh
+                    tight = max(abs(m - col_c) for m in mids) <= 3
+                    if (maxw > 0.85 * col_w and not tight) or abs(med - col_c) > 12:
                         continue
-                    # rata tengah = tepi kiri baris bervariasi; blok sempit indent-
-                    # stabil (mis. "untuk memenuhi..." di halaman judul) diterima
-                    # bila jauh dari margin & mid-nya di sekitar pusat halaman —
-                    # item daftar/justify indent (kiri ~konstan, lebar ~penuh) ditolak,
-                    # blok tanda tangan rata-kanan jauh dari pusat juga ditolak
-                    ok_narrow = (min(lefts) >= 8 and maxw <= page_right * 0.8 and
-                                 page_center is not None and abs(med - page_center) <= 12)
-                    if not (var >= 6 or ok_narrow):
+                    # baris di margin (indent kecil, varian sempit) = paragraf biasa
+                    if min(lefts) <= 2 and var < 5:
                         continue
-                blktext = norm(''.join(l.strip() for l in sb))
-                if len(blktext) < 2:
-                    continue               # 'by' (byline EN) tetap tertangkap via geometri
-                tgt = None
-                for j in range(acur, len(idxs)):
-                    t = para_texts[idxs[j]]
-                    if not t:
+                    # rata tengah = tepi kiri bervariasi; blok sempit indent-stabil
+                    # (mis. blok dedikasi di halaman judul) boleh bila jauh dari
+                    # margin & mid-nya di sekitar pusat kolom
+                    ok_narrow = (min(lefts) >= 25 and maxw <= 0.8 * col_w and
+                                 abs(med - col_c) <= 12)
+                    # judul lebar multi-baris (halaman judul): tepi kirinya nyaris
+                    # seragam persis seperti justify, tapi mid-nya presisi di pusat
+                    if not (var >= 5 or ok_narrow or (tight and min(lefts) > 2)):
                         continue
-                    if (t == blktext or (len(blktext) >= 12 and
-                                        (t.startswith(blktext[:16]) or blktext.startswith(t[:16])))):
-                        tgt = j
+                # cocokkan: teks sub-blok, lalu GABUNGAN dengan sub-blok berikutnya
+                # ("BAB II" + "TINJAUAN PUSTAKA" bisa terpecah oleh aturan lebar)
+                tgt, blktext = None, ''
+                nsub1 = len(norm(''.join(L['t'] for L in subs[si])))
+                for take in (1, 2, 3):
+                    if si + take > len(subs):
+                        break
+                    if take > 1 and nsub1 > 24:
+                        break   # gabungan hanya untuk sub sangat pendek ('BAB II')
+                    blktext = norm(''.join(L['t'] for s2 in subs[si:si + take]
+                                           for L in s2))
+                    if len(blktext) < 2:
+                        continue           # 'by' (byline EN) tetap tertangkap via geometri
+                    # jendela maju terbatas: urutan docx bisa beda dari PDF
+                    # (front matter dipindah polish), tapi tidak ratusan paragraf —
+                    # scan tanpa batas membuat satu salah-match melompatkan kursor
+                    # jauh & meracuni semua halaman berikutnya
+                    # pass 1 persis boleh jauh (judul asli bisa terdorong ratusan
+                    # paragraf oleh entri daftar isi buatan polish); pass 2 prefix
+                    # harus dekat — fuzzy, mudah salah sasaran. Pass 0 mundur:
+                    # polish memindah INTISARI/ABSTRAK ke depan sehingga targetnya
+                    # di belakang kursor — persis-sama aman dicari ke belakang.
+                    for j in range(acur, min(acur + 600, len(idxs))):
+                        if para_texts[idxs[j]] == blktext:
+                            tgt = j
+                            break
+                    if tgt is None:
+                        for j in range(acur - 1, -1, -1):
+                            if para_texts[idxs[j]] == blktext:
+                                tgt = j
+                                break
+                    if tgt is None:
+                        for j in range(acur, min(acur + 80, len(idxs))):
+                            t = para_texts[idxs[j]]
+                            if t and len(blktext) >= 12 and (
+                                    t.startswith(blktext[:16]) or
+                                    blktext.startswith(t[:16])):
+                                tgt = j
+                                break
+                    if tgt is not None:
                         break
                 if tgt is None:
                     continue
+                # make4ht memetakan \chapter ke paragraf bernomor (numPr) — pada
+                # judul itu murni artefak struktur; buang agar bisa ditanam jc
+                # (dan nomor tak di-drop numPr asli Word tak ikut tampil salah)
+                segs[idxs[tgt]][1] = re.sub(
+                    r'<w:numPr>.*?</w:numPr>|<w:numPr\s*/>', '',
+                    segs[idxs[tgt]][1], flags=re.S)
                 new, changed = set_center(segs[idxs[tgt]][1])
                 if changed:
                     segs[idxs[tgt]][1] = new
                     n_center += 1
                     if len(centered_log) < 12:
                         centered_log.append(blktext[:34])
-                acur = tgt
+                if block_bold(pno, sb) >= 0.6:
+                    new, ch = set_bold(segs[idxs[tgt]][1])
+                    if ch:
+                        segs[idxs[tgt]][1] = new
+                        n_bold += 1
+                acur = max(acur, tgt)   # match mundur tak menarik kursor mundur
 
     # ---------- 5. VERTICAL-SPACE oracle (jarak antar-baris dari koordinat-y PDF) ----------
     VGAP_MIN_PT, VGAP_MAX_PT = 6.0, 40.0
@@ -338,24 +498,7 @@ def run(PDF, SRC, DST, TOC=""):
         el = f'<w:ind {" ".join(keep)}/>' if keep else ''
         return raw[:m.start()] + el + raw[m.end():]
 
-    bbox = subprocess.run(['pdftotext', '-bbox', PDF, '-'],
-                          capture_output=True, text=True, check=True).stdout
-    bpages = []
-    for chunk in re.split(r'<page ', bbox)[1:]:
-        ws = re.findall(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="[\d.]+" '
-                        r'yMax="([\d.]+)">([^<]*)</word>', chunk)
-        lines = []
-        for x0, y0, y1, w in sorted(((float(a), float(b), float(c), d)
-                                     for a, b, c, d in ws), key=lambda t: t[1]):
-            if lines and abs(lines[-1]['y0'] - y0) < 3:
-                L = lines[-1]
-                L['t'] += ' ' + w
-                L['y1'] = max(L['y1'], y1)
-                L['x0'] = min(L['x0'], x0)
-            else:
-                lines.append({'y0': y0, 'y1': y1, 'x0': x0, 't': w})
-        bpages.append(lines)
-
+    # (geometri per-baris bpages sudah diurai di bagian 4 — dipakai ulang di sini)
     n_vgap = n_vbig = 0
     vgap_log = []
     vcur = 0
@@ -421,6 +564,7 @@ def run(PDF, SRC, DST, TOC=""):
     print(f'[graft] batas mid-paragraf : {n_mid} (dilewati — paragraf tidak dipotong)')
     print(f'[graft] tidak ketemu       : {n_miss} (halaman {missed})')
     print(f'[graft] rata tengah (PDF)  : {n_center} paragraf')
+    print(f'[graft] judul bold (font)  : {n_bold} paragraf')
     if centered_log:
         print(f'[graft] contoh             : {", ".join(centered_log)}')
     print(f'[graft] jarak vertikal PDF : {n_vgap} paragraf (w:before)')

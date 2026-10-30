@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tex2docx-engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "LaTeX to DOCX conversion that runs the real TeX engine, then grafts the measured PDF layout onto the DOCX"
 readme = "README.md"
 license = { text = "MIT" }

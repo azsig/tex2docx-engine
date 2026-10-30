@@ -77,10 +77,19 @@ def _convert(workdir, main, out, font, tmp, keep):
     _need('pdftotext')
 
     # ---------- 1. make4ht: konten via engine TeX asli ----------
-    _run([_need('make4ht'), '-f', 'odt', f'{main}.tex'], workdir)
+    # make4ht kerap exit != 0 walau ODT tetap dihasilkan lengkap (error htlatex
+    # yang recoverable — mis. \insertchapterspace undefined di cls custom).
+    # Kriteria sukses tahap ini = <main>.odt terbentuk.
     odt = os.path.join(workdir, f'{main}.odt')
-    if not os.path.isfile(odt):
-        raise SystemExit(f'[pipeline] make4ht tidak menghasilkan {main}.odt')
+    before = os.path.getmtime(odt) if os.path.isfile(odt) else 0
+    r = subprocess.run([_need('make4ht'), '-f', 'odt', f'{main}.tex'],
+                       cwd=workdir, capture_output=True, text=True)
+    if not (os.path.isfile(odt) and os.path.getmtime(odt) > before):
+        tail = '\n'.join((r.stderr or r.stdout).splitlines()[-12:])
+        raise SystemExit(f'[pipeline] gagal: make4ht -f odt {main}.tex\n{tail}')
+    if r.returncode != 0:
+        print(f'[pipeline] make4ht exit={r.returncode} '
+              f'(error recoverable — {main}.odt tetap dihasilkan)')
 
     # ---------- 2. perbaiki ODT + konversi ke DOCX via LibreOffice ----------
     odt_fixed = os.path.join(tmp, f'{main}_fixed.odt')
