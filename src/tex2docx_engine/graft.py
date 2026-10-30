@@ -28,6 +28,10 @@ dicocokkan ke paragraf DOCX dan diberi page-break.
   w:before="0" literal di semua paragraf). Jarak vertikal diukur dari koordinat-y
   pdftotext -bbox: rata baris normal halaman = median jarak antar-baris; selisih
   di atas ambang = jarak yang disengaja -> ditanam sebagai w:spacing/@w:before.
+  HIBRIDA native-menang (t2dcfg.cfg): paragraf yang sudah membawa w:before >= 1
+  dari marker native TIDAK ditimpa dan 'after' pendahulunya tidak dinolkan —
+  oracle hanya mengisi paragraf tanpa marker (\\addvspace, \\vfill, \\[X]
+  intra-paragraf). LO menulis literal "0" bila tak ada -> >= 1 = pasti native.
   Baris PERTAMA tiap halaman di-skip (jaraknya ke header/top, bukan antar-paragraf;
   paginasinya sudah ditangani page-break oracle). Jarak sangat besar (>= 40pt)
   dilewati: biasanya area gambar/tabel yang tak punya teks di bbox.
@@ -499,7 +503,14 @@ def run(PDF, SRC, DST, TOC=""):
         return raw[:m.start()] + el + raw[m.end():]
 
     # (geometri per-baris bpages sudah diurai di bagian 4 — dipakai ulang di sini)
-    n_vgap = n_vbig = 0
+    def has_native_before(raw):
+        """True bila paragraf sudah membawa w:before native (marker t2dcfg ->
+        fix_odt -> LibreOffice). LO menulis literal "0" bila tak ada, jadi nilai
+        >= 1 = pasti hasil native. Native MENANG: oracle tak menimpanya."""
+        m = re.search(r'<w:spacing\b[^>]*/>', raw)
+        return bool(m and re.search(r'w:before="[1-9]\d*"', m.group(0)))
+
+    n_vgap = n_vbig = n_native = 0
     vgap_log = []
     vcur = 0
     for lines in bpages:
@@ -536,6 +547,13 @@ def run(PDF, SRC, DST, TOC=""):
                 q = prev_nonempty(tgt)          # jarak sebelum tabel -> w:after sebelumnya
                 if q is not None:
                     segs[idxs[q]][1] = upsert_attr(segs[idxs[q]][1], 'w:after', tw)
+            elif has_native_before(segs[idxs[tgt]][1]):
+                # HIBRIDA native-menang: w:before sudah dari marker \vspace/\vskip
+                # asli — jangan ditimpa oracle, dan 'after' pendahulu JANGAN
+                # dinolkan (native before + after menjumlah, meniru \vspace +
+                # \parskip LaTeX). Oracle tetap mengisi paragraf tanpa marker
+                # (\addvspace, \vfill, \\[X] intra-paragraf).
+                n_native += 1
             else:
                 segs[idxs[tgt]][1] = upsert_attr(segs[idxs[tgt]][1], 'w:before', tw)
                 # gap PDF = SATU jarak (semantik \vskip): milik 'before' paragraf
@@ -567,7 +585,8 @@ def run(PDF, SRC, DST, TOC=""):
     print(f'[graft] judul bold (font)  : {n_bold} paragraf')
     if centered_log:
         print(f'[graft] contoh             : {", ".join(centered_log)}')
-    print(f'[graft] jarak vertikal PDF : {n_vgap} paragraf (w:before)')
+    print(f'[graft] jarak vertikal PDF : {n_vgap} paragraf '
+          f'({n_native} native dibiarkan)')
     if vgap_log:
         print(f'[graft] contoh jarak       : {", ".join(vgap_log)}')
     print(f'[graft] jarak >= 40pt      : {n_vbig} dilewati (area gambar/tabel)')

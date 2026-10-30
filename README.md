@@ -22,10 +22,117 @@ broken lists. This engine takes the opposite route:
 ```
 <main>.tex ──pdflatex──> <main>.pdf (layout oracle) + .toc/.lot/.lof/.nls
       │
-      └──make4ht -f odt──> <main>.odt ──fix_odt──> ──LibreOffice──> raw .docx
+      └──make4ht -f odt -c t2dcfg──> <main>.odt (content + native markers)
+                                        │
+                     fix_odt (markers → automatic styles) ──LibreOffice──> raw .docx
                                                               │
    raw.docx ──polish──> typography ──graft (PDF oracle)──> <main>_engine.docx
 ```
+
+## Native semantics layer (v0.3)
+
+The oracle above still has a blind spot: `make4ht` *discards* LaTeX semantics
+(`\vspace`, `\vskip`, `\centering`, `\\`) on the way to ODT, so the PDF had to
+re-guess what the source said explicitly. v0.3 adds a tex4ht config shipped
+inside the package (`t2dcfg.cfg`, loaded via `TEXINPUTS`) that makes tex4ht
+**emit those semantics as XML comment markers at the exact point they occur**.
+`fix_odt.py` then translates markers into ODT automatic styles *before*
+LibreOffice — spacing and alignment are now read natively from the TeX run,
+not inferred from PDF geometry:
+
+| LaTeX source | Marker in `content.xml` | Planted as |
+|---|---|---|
+| `\vspace{x}` `\vspace*{x}` `\bigskip` `\medskip` `\smallskip` `\\[x]` | `<!--t2dvs:14.2pt-->` | `fo:margin-top` on the next content block (consecutive glue **sums**; net < 1 pt dropped) |
+| `\vskip x` (intercepted after `\begin{document}`, internal-mode `\vskip` passes through) | `<!--t2dvs:Npt-->` | same |
+| `\centering` / `\raggedright` / `\raggedleft` | `<!--t2dalign:center\|left\|right-->` … `<!--t2dalign:end-->` | `fo:text-align` scope until the enclosing group ends (`\aftergroup`; the end-marker is emitted in *every* context — swallowing it lets a chapter-heading `\centering` leak across the whole chapter) |
+| `\newpage` `\clearpage` `\cleardoublepage` | `<!--t2dbrk-->` | `fo:break-before="page"` |
+| `\\` (plain newline) | — (direct) | `<text:line-break/>` |
+| Chapter title alignment | — (style-level) | class intent read from `\meaning\@makechapterhead`, re-issued as `fo:text-align` on Heading-1 + hardened per `text:h` |
+
+Markers are position-classified: a marker at the *head* of a paragraph applies
+to that block, at the *tail* to the next block, mid-paragraph (`\\[x]` inside a
+line) is dropped — line spacing inside one paragraph has no Word equivalent.
+The state machine walks the document **recursively** — into `text:section`
+(`center`/`quote`/float environments), lists and index containers — because
+that is where most `\centering`/`\vspace` of a real document live; without
+the recursion the validation thesis lost all 103 alignment markers. Alignment
+scope is **one state across all marker sources** (between-block comments,
+paragraph head/tail, marker-only paragraphs): an earlier design kept them in
+two variables, so an `align:end` at a paragraph tail never closed a scope
+opened between blocks — a chapter head's `\centering` leaked until the end of
+the chapter and every `\section` title came out centered (they are left in
+the PDF).
+Empty paragraphs that t4ht spawns to carry vmode markers are collapsed into the
+state machine, not left as blank lines; pure whitespace-only paragraphs (a
+tex4ht/xtpipes artifact — ~450 of them inside the validation thesis's
+`center` environments) are removed too, except inside table cells where ODF
+requires at least one paragraph.
+
+Markers are emitted as **raw DVI specials** (`\ht:special{t4ht=…}`), not via
+`\HCode`: `\HCode` executes `\leavevmode` in vertical mode (tex4ht.sty), and a
+marker fired at an *internal* `\vskip` (list setup `\vskip\topsep`,
+`\endtrivlist`, …) then starts a paragraph mid-list — LaTeX's list state
+breaks with `Something's wrong—perhaps a missing \item` (76 in the validation
+thesis), `thebibliography` never starts, and the cascade ends in unbalanced
+XML. The raw special carries the identical payload with zero effect on TeX's
+mode.
+
+The result is **hybrid by default**: native markers win for spacing/alignment;
+the PDF oracle keeps what only it can know (pagination, gaps with no marker
+such as `\addvspace`/`\vfill`, ≥ 40 pt float regions). In `graft`, a paragraph
+that already carries a native `w:before` is skipped by the vertical-spacing
+oracle (no double-planting, no zeroing).
+
+### Running without a PDF toolchain
+
+```bash
+tex2docx path/to/project --main skripsi --no-pdf
+```
+
+Skips `pdflatex` and `graft` entirely — for machines with TeX Live +
+LibreOffice but no poppler/pdflatex. Page breaks then come only from
+`\newpage`-family markers and tex4ht's per-chapter breaks; spacing and
+alignment are fully native.
+
+### Robustness notes (learned the hard way, on the 85-page validation thesis)
+
+- t4ht **can** emit unbalanced XML, and the pipeline no longer judges the run
+  by the log alone: on `Unbalanced Tag` it inspects the produced ODT and
+  accepts it only if `content.xml` parses as strict XML and the text covers
+  ≥ 60 % of the PDF oracle. In practice the big generator of unbalanced output
+  on the validation thesis was our own marker layer firing `\HCode` at
+  internal `\vskip`s (see above); since markers moved to raw specials the
+  thesis compiles with **zero structural errors** — no heal, clean ODF,
+  LibreOffice imports it whole. The heal/repair machinery (domfilter's
+  HTML-DOM reparse, `fix_odt`'s pre-parse string repair for a stray
+  `</text:p>` after `</text:bibliography>` and markers past the closed root)
+  stays in as a safety net for unhealed input; mid-document wounds (which
+  truncate content — an earlier build came out 748/1625 paragraphs) still
+  fail validation and trigger a retry with cleaned t4ht intermediates.
+- Two "errors" in the log are **benign noise** on this class of documents:
+  `Missing } inserted` at `\end{thebibliography}` (27×; tex4ht's `\bibitem`
+  handling recovers on its own — the entries come through fine) and
+  `Command \insertchapterspace undefined` (a `\renewcommand` in the class
+  over a command only `tocloft`/pdflatex defines). Neither blocks a complete,
+  balanced ODT.
+- **Silent truncation is measured, not assumed.** In hybrid mode the ODT's
+  text content must cover ≥ 60 % of the PDF oracle's text (measured: broken
+  builds score 27–55 %, complete ones ~96 %). This catches cut-offs that
+  leave balanced XML and no log warning — the validation thesis once stopped
+  quietly at a figure on page 290 of 329.
+- `\includegraphics{../dir/figure.png}` (paths **outside** the project
+  directory) is legal for pdflatex, but tex4ht refuses to *create* its
+  `.4og` marker there and aborts at that page — the ODT still comes out
+  looking balanced, just silently cut off at the figure (the validation
+  thesis lost BAB V–VI this way). The pipeline pre-creates the 0-byte marker
+  at the path the document itself references (proactive scan + reactive log
+  parse) and retries.
+- LibreOffice ODT→DOCX on documents with ~900 embedded Math objects can
+  abort mid-import (exit 0, partial DOCX). Block-count validation alone is
+  not enough — one abort kept 89 % of blocks and 97 % of text yet dropped
+  the bibliography entries — so the pipeline additionally checks that the
+  DOCX still contains the fingerprint of the ODT's **last non-table
+  paragraph**, and retries with a fresh profile (up to 3×).
 
 ## The universality rule
 
@@ -87,6 +194,14 @@ e.g. when your app already produces the raw DOCX and the PDF separately.
   at the cost of pagination fidelity there).
 - **Vertical gaps ≥ 40pt are skipped** — usually figure/table regions with no
   text in the text bbox, which can't be measured from text geometry.
+- **Native markers don't cover everything**: `\addvspace`, `\vfill`,
+  class-internal spacing and `\\[x]` *inside* a paragraph line carry no marker
+  — in hybrid mode the PDF oracle fills those in, in `--no-pdf` mode they fall
+  back to defaults. Mid-chapter page breaks are oracle-only; `--no-pdf` breaks
+  come from `\newpage` + chapter starts only.
+- **Section-title alignment** (`Heading-2/3`, i.e. `\section`/`\subsection`)
+  is not marker-read in v1: hybrid mode keeps the oracle for it, `--no-pdf`
+  keeps the class default.
 - Right-alignment (signature blocks) is not yet transplanted.
 - Bold is only re-planted on paragraphs the centering oracle matched (chapter
   titles, front-matter titles, bylines); run-in bold inside body text comes
@@ -96,13 +211,17 @@ e.g. when your app already produces the raw DOCX and the PDF separately.
 ## Status
 
 Developed and validated against an 85-page university thesis (custom UGM
-`skripsidtntf.cls`): 44/53 page breaks planted, all 12 chapter/front-matter
-titles (BAB I–VI, KATA PENGANTAR, DAFTAR ISI/TABEL/GAMBAR/LAMBANG, DAFTAR
-PUSTAKA) re-centered *and* re-bolded straight from PDF font evidence, all
-abstract bylines centered by geometry alone in two languages (id/en), 148
-vertical gaps measured from the PDF (0.5 cm `\vspace` → 350 twips,
-`\vskip 6pt` → 181 twips, …), regenerated TOC/LOT/LOF/nomenclature lists with
-correct page numbers.
+`skripsidtntf.cls`). With the v0.3 native layer the full document converts
+end-to-end: make4ht runs with **zero structural errors** (balanced XML at
+source, no heal), LibreOffice imports it whole — bibliography entries
+included (25/25, previously lost), supervisor-approval table included — and
+the final DOCX carries 46 oracle page breaks, 9/9 chapter/front-matter
+titles centered *and* bold (BAB I–VI, KATA PENGANTAR, DAFTAR LAMBANG,
+DAFTAR PUSTAKA) via the Heading-1 native layer, section titles correctly
+**left** (as in the PDF), 139 native alignment scopes, 215 native vertical
+spacings, and regenerated TOC/LOT/LOF/nomenclature lists with correct page
+numbers. Versus the pre-native build: +5 200 characters of recovered text
+(bibliography), centering 220 vs 134 paragraphs, `w:before` 267 vs 190.
 
 ## License
 
