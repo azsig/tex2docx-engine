@@ -43,19 +43,47 @@ TABLE_NS = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0'
 BLOCK_TAGS = {
     f'{{{TEXT_NS}}}p', f'{{{TEXT_NS}}}h', f'{{{TEXT_NS}}}list',
     f'{{{TEXT_NS}}}section', f'{{{TEXT_NS}}}table-of-content',
+    f'{{{TEXT_NS}}}bibliography',
     f'{{{TABLE_NS}}}table',
 }
 # Blok konten yang sah menerima fo:margin-top / fo:text-align / fo:break-before.
 CONTENT_TAGS = {f'{{{TEXT_NS}}}p', f'{{{TEXT_NS}}}h', f'{{{TEXT_NS}}}list'}
-# Wadah float/TOC: TIDAK mengonsumsi pending — marker menunggu blok konten
-# nyata pertama di dalam / setelahnya.
-CONTAINER_TAGS = {f'{{{TEXT_NS}}}section', f'{{{TEXT_NS}}}table-of-content'}
+# Wadah float/TOC/pustaka: TIDAK mengonsumsi pending — marker menunggu blok
+# konten nyata pertama di dalam / setelahnya.
+CONTAINER_TAGS = {f'{{{TEXT_NS}}}section', f'{{{TEXT_NS}}}table-of-content',
+                  f'{{{TEXT_NS}}}bibliography'}
 
 RE_VS = re.compile(r't2dvs:(-?[\d.]+)pt')
 RE_ALIGN = re.compile(r't2dalign:(center|left|right|end)')
 RE_BRK = re.compile(r't2dbrk')
 RE_T2D_ANY = re.compile(r't2d(vs|align|brk)')
 RE_T2D_BYTES = re.compile(rb'<!--\s*t2d[^>]*-->')
+# </text:p> LIAR tepat setelah penutup kontainer daftar (paragraf ODF tak
+# pernah MEMBAWA index-body/bibliography/list — tutup-p setelahnya pasti
+# sampah struktural dari pemulihan error "Missing }" \end{thebibliography}).
+RE_STRAY_CLOSE_P = re.compile(
+    r'(</text:(?:index-body|bibliography|list)>)\s*</text:p>')
+ROOT_CLOSE = '</office:document-content>'
+
+
+def _repair_content(data):
+    """Perbaikan string PRA-parse untuk luka struktural ujung dokumen tex4ht
+    (keduanya terverifikasi di skripsi uji, keduanya di ujung bibliografi):
+
+    1. `</text:p>` liar setelah penutup kontainer daftar — error kronis
+       "Missing } inserted" saat \\end{thebibliography} (.bbl ber-\\url)
+       menyisakan satu tag tutup paragraf tanpa pembuka, DI LUAR kontainer.
+    2. Apa pun SETELAH </office:document-content> — marker <!--t2dbrk--> dari
+       \\clearpage yang terpanggil di \\end{document} terpancar SETELAH root
+       tertutup (t4ht sudah menutup semuanya saat itu).
+
+    make4ht biasanya menyembuhkan keduanya via reparse HTML-DOM domfilter;
+    repair ini menjamin fix_odt tak bergantung pada penyembuh itu (dan tetap
+    benar untuk .4oo mentah jalur tanpa-make4ht)."""
+    i = data.find(ROOT_CLOSE)
+    if i != -1:
+        data = data[:i + len(ROOT_CLOSE)]
+    return RE_STRAY_CLOSE_P.sub(r'\1', data)
 
 
 class StyleRegistry:
@@ -134,7 +162,7 @@ def planted_heading_aligns(styles_xml):
 
 def run(SRC, DST):
     zin = zipfile.ZipFile(SRC)
-    content = zin.read('content.xml').decode('utf-8')
+    content = _repair_content(zin.read('content.xml').decode('utf-8'))
 
     # Prefiks wajib dipristinakan SEBELUM serialisasi: content.xml buatan
     # make4ht tidak selalu mendeklarasikan fo: — tanpa ini ET menulis
@@ -163,13 +191,30 @@ def run(SRC, DST):
     # semua komentar, jadi ini setara perilaku sebelumnya.)
     parent = {c: p for p in root.iter() for c in p}
 
-    def top_ancestor(el):
-        cur = el
-        while parent.get(cur) is not None and parent[cur] is not office_text:
-            cur = parent[cur]
-        return cur
-
-    trailing_brk = set()  # id() blok top-level yang diakhiri <!--t2dbrk-->
+    # Klasifikasi marker DI DALAM paragraf berdasar posisi (marker HCode polos
+    # dari t2dcfg jatuh pada titik sisip aktual TeX):
+    #   LEADING  (tanpa konten sebelum)  -> berlaku UNTUK BLOK INI
+    #             (vs -> margin-top blok ini; align -> align blok ini + buka
+    #              scope; brk -> break-before blok ini)
+    #   TRAILING (tanpa konten sesudah)  -> berlaku UNTUK BLOK BERIKUTNYA
+    #             (vs/brk -> pending; align:X -> buka scope; align:end ->
+    #              tutup scope SETELAH blok ini)
+    #   TENGAH   (konten dua sisi)       -> intra-baris (\\[X] dsb.) — buang
+    # Sasaran marker = PARAGRAF LANGSUNG pembawanya (par). Jangan panjat ke
+    # ancestor top-level: paragraf di dalam text:section (env center/quote)
+    # atau list-item punya ancestor section/list — memakai ancestor sebagai
+    # "blok" membuat SEMUA marker di dalamnya tersesat sebagai drop-inline
+    # (skripsi uji: 794 marker align/vs lenyap padahal posisinya sah).
+    leading = {}     # id(text:p/h) -> list marker utk blok itu
+    open_scope = {}  # id(text:p/h) -> nilai align (buka di trailing blok ini)
+    close_after = set()   # id(text:p/h) — align:end trailing: blok ini terakhir scope
+    trailing_vs = {}      # id(blok) -> [pt] pending utk blok berikutnya
+    trailing_brk = set()  # id() blok yang diakhiri <!--t2dbrk-->
+    # text:p yang isinya HANYA marker: HCode di vmode memang melahirkan
+    # paragraf kosong pembawa komentar (skripsi uji: +300 paragraf hampa).
+    # Paragraf ini transparan — markernya masuk state machine pass B,
+    # elemennya dibuang total (bukan sekadar dikosongkan).
+    marker_only = set()
     for node in list(root.iter()):
         if node.tag is not ET.Comment:
             continue
@@ -180,19 +225,72 @@ def run(SRC, DST):
             continue
         if par is office_text:
             continue  # marker ANTAR blok — urusan state machine pass B
-        if RE_BRK.search(txt) and _is_trailing(par, node):
-            block = top_ancestor(node)
-            if block is not office_text and block.tag in CONTENT_TAGS:
-                trailing_brk.add(id(block))
-        elif RE_T2D_ANY.search(txt):
-            stats['drop_inline'] += 1  # vs/align intra-blok — dibuang (v1)
+        if par.tag in CONTAINER_TAGS or par.tag == f'{{{TEXT_NS}}}list-item':
+            # marker antar-blok DI DALAM kontainer (section/TOC/pustaka/
+            # list-item) — DIBIARKAN agar walk() rekursif membacanya.
+            # (Dulu masuk klasifikasi inline dan DIHAPUS di sini: scope
+            # align yang dibuka di dalam env tak pernah tertutup di level
+            # state — skripsi uji: \centering kepala bab melumuri seluruh
+            # isi bab, semua Heading-2 jadi center padahal kiri di PDF.)
+            continue
+        if not RE_T2D_ANY.search(txt):
+            par.remove(node)
+            continue
+        if par.tag in CONTENT_TAGS and _is_marker_only(par):
+            marker_only.add(id(par))
+        is_head = _is_leading(par, node)
+        is_tail = _is_trailing(par, node)
+        block = par
+        blk_ok = par.tag in CONTENT_TAGS
+        m = RE_VS.search(txt)
+        if m:
+            val = float(m.group(1))
+            if is_head and blk_ok:
+                leading.setdefault(id(block), []).append(('vs', val))
+            elif is_tail and blk_ok:
+                trailing_vs.setdefault(id(block), []).append(val)
+            else:
+                stats['drop_inline'] += 1
+        elif RE_ALIGN.search(txt):
+            kind = RE_ALIGN.search(txt).group(1)
+            if kind == 'end':
+                if is_head and blk_ok:
+                    close_after.discard(id(block))  # scope tutup sebelum blok ini
+                    leading.setdefault(id(block), []).append(('alignend', None))
+                elif is_tail and blk_ok:
+                    close_after.add(id(block))
+                else:
+                    stats['drop_inline'] += 1
+            else:
+                if is_head and blk_ok:
+                    leading.setdefault(id(block), []).append(('align', kind))
+                elif is_tail and blk_ok:
+                    open_scope[id(block)] = kind
+                else:
+                    stats['drop_inline'] += 1
+        elif RE_BRK.search(txt):
+            if is_head and blk_ok:
+                leading.setdefault(id(block), []).append(('brk', None))
+            elif is_tail and blk_ok:
+                if blk_ok:
+                    trailing_brk.add(id(block))
+            else:
+                stats['drop_inline'] += 1
         par.remove(node)
 
-    # ---- pass B: state machine atas anak top-level <office:text> ----
-    # Marker sebelum blok konten PERTAMA dibuang: halaman 1 sudah mulai
-    # (\chapter memicu \clearpage internal + \vspace*{50pt} — keduanya tak
-    # bermakna di awal dokumen Word dan break-before berisiko halaman kosong).
+    # ---- pass B: state machine atas isi <office:text>, REKURSIF ----
+    # Dua sumber marker BERGABUNG di sini: (a) komentar antar blok (anak
+    # langsung wadah — state di bawah), (b) marker leading/trailing di dalam
+    # paragraf (pass A). Glue LaTeX menjumlah, jadi vs dari kedua sumber
+    # dijumlahkan sebelum ditanam sebagai margin-top.
+    # Walker MENURUN ke text:section (env center/quote/float), text:list
+    # (itemnya) dan table-of-content/bibliography: mayoritas \centering dan
+    # \vspace dokumen nyata hidup DI DALAM environment tersebut — tanpa
+    # rekursi markernya mati semua (skripsi uji: align=0, margin=7).
+    # Marker sebelum blok konten PERTAMA dibuang: halaman 1 sudah mulai.
     state = {'vs': [], 'align': None, 'brk': False, 'seen': False}
+    CELL_TAG = f'{{{TABLE_NS}}}table-cell'
+    LIST_ITEM_TAG = f'{{{TEXT_NS}}}list-item'
 
     def target_of(el):
         """text:list tak menerima style paragraf — sasaran paragraf pertama."""
@@ -202,65 +300,127 @@ def run(SRC, DST):
             return None
         return el
 
-    for el in list(office_text):
-        if el.tag is not ET.Comment:
-            if el.tag in CONTENT_TAGS:
-                tgt = target_of(el)
-                props = {}
-                if state['seen']:
-                    if state['vs']:
-                        net = sum(state['vs'])
-                        if net >= 1.0:
-                            props['margin-top'] = f'{round(net, 3)}pt'
-                            stats['margin'] += 1
-                        else:
-                            stats['drop_vs'] += 1
-                    if state['brk']:
-                        props['break-before'] = 'page'
-                        stats['brk'] += 1
-                state['seen'] = True
-                if state['align']:
-                    props['text-align'] = state['align']
-                    stats['align'] += 1
-                if tgt is not None:
-                    reg.apply(tgt, props)
-                state['vs'] = []
-                state['brk'] = False
-                # align TIDAK direset: scope berlaku sampai t2dalign:end
-            elif (el.tag in CONTAINER_TAGS and state['align']):
-                # env \begin{center}/quote -> text:section; scope align
-                # membungkus section -> perataan berlaku ke paragraf di
-                # dalamnya (container tak menerima style paragraf sendiri).
-                for p in el.iter(f'{{{TEXT_NS}}}p'):
-                    reg.apply(p, {'text-align': state['align']})
-                    stats['align'] += 1
-            # container (section/TOC) & table & frame: tidak konsumsi pending
-            continue
-        # komentar top-level = marker antar blok
-        txt = el.text or ''
-        office_text.remove(el)
-        m = RE_VS.search(txt)
-        if m:
-            state['vs'].append(float(m.group(1)))
-            continue
-        m = RE_ALIGN.search(txt)
-        if m:
-            state['align'] = None if m.group(1) == 'end' else m.group(1)
-            continue
-        if RE_BRK.search(txt):
-            state['brk'] = True
+    def consume(el):
+        """Terapkan semua sumber marker pada blok konten `el`.
 
-    # \newpage di ujung paragraf -> break untuk blok konten BERIKUTNYA
-    # (\newpage user kerap tanpa blank line; marker jatuh di dalam <text:p>
-    # terakhir, tapi maksudnya jelas: konten selanjutnya di halaman baru.)
-    prev = None
-    for el in list(office_text):
-        if el.tag in CONTENT_TAGS:
-            if prev is not None and id(prev) in trailing_brk:
-                reg.apply(el, {'break-before': 'page'})
+        Scope align = SATU state (`state['align']`) untuk SEMUA sumber
+        marker: antar-blok (walk), leading/trailing paragraf (pass A),
+        marker-only (absorb). Dulu tail align:end hanya menull-kan
+        `intra_scope` padahal scope dibuka lewat `state['align']` — scope
+        tak pernah tertutup dan \centering bocor lintas bab (semua
+        Heading-2 skripsi uji jadi center padahal kiri di PDF)."""
+        tgt = target_of(el)
+        props = {}
+        vs_vals = list(state['vs']) + [v for k, v in leading.get(id(el), [])
+                                       if k == 'vs']
+        blk_align = None
+        for k, v in leading.get(id(el), []):
+            if k == 'align':
+                blk_align = v
+            elif k == 'brk':
+                if state['seen']:
+                    props['break-before'] = 'page'
+                    stats['brk'] += 1
+            elif k == 'alignend':
+                state['align'] = None   # penutup sebelum blok ini
+        if blk_align:
+            state['align'] = blk_align  # leading align juga membuka scope
+        if state['seen']:
+            if vs_vals:
+                net = sum(vs_vals)
+                if net >= 1.0:
+                    props['margin-top'] = f'{round(net, 3)}pt'
+                    stats['margin'] += 1
+                else:
+                    stats['drop_vs'] += 1
+            if state['brk']:
+                props.setdefault('break-before', 'page')
                 stats['brk'] += 1
-                trailing_brk.discard(id(prev))
-            prev = el
+        state['seen'] = True
+        if state['align']:
+            props['text-align'] = state['align']
+            stats['align'] += 1
+        if tgt is not None:
+            reg.apply(tgt, props)
+        state['vs'] = []
+        state['brk'] = False
+        # transisi scope dari marker TRAILING blok ini (berlaku blok berikut)
+        if id(el) in open_scope:
+            state['align'] = open_scope[id(el)]
+        if id(el) in close_after:
+            state['align'] = None
+
+    def absorb_marker_only(el, container):
+        """Paragraf hampa pembawa marker: markernya masuk state antar-blok,
+        elemennya dibuang (HCode vmode t4ht melahirkannya otomatis)."""
+        for k, v in leading.pop(id(el), []):
+            if k == 'vs':
+                state['vs'].append(v)
+            elif k == 'align':
+                state['align'] = v
+            elif k == 'alignend':
+                state['align'] = None
+            elif k == 'brk':
+                state['brk'] = True
+        trailing_vs.pop(id(el), None)
+        trailing_brk.discard(id(el))
+        open_scope.pop(id(el), None)
+        close_after.discard(id(el))
+        container.remove(el)
+
+    def walk(container):
+        for el in list(container):
+            if el.tag is ET.Comment:
+                # komentar antar blok = marker
+                txt = el.text or ''
+                container.remove(el)
+                m = RE_VS.search(txt)
+                if m:
+                    state['vs'].append(float(m.group(1)))
+                    continue
+                m = RE_ALIGN.search(txt)
+                if m:
+                    state['align'] = (None if m.group(1) == 'end'
+                                      else m.group(1))
+                    continue
+                if RE_BRK.search(txt):
+                    state['brk'] = True
+                continue
+            if el.tag in CONTENT_TAGS:
+                if id(el) in marker_only:
+                    absorb_marker_only(el, container)
+                else:
+                    consume(el)
+                    # trailing marker milik blok ini -> pending blok konten
+                    # BERIKUTNYA (\newpage tanpa blank line, glue sisa group)
+                    for v in trailing_vs.pop(id(el), []):
+                        state['vs'].append(v)
+                    if id(el) in trailing_brk:
+                        state['brk'] = True
+                        trailing_brk.discard(id(el))
+                if el.tag == f'{{{TEXT_NS}}}list':
+                    walk(el)   # marker di dalam item paragraf
+                continue
+            if el.tag in CONTAINER_TAGS or el.tag == LIST_ITEM_TAG:
+                walk(el)       # section/TOC/pustaka/list-item
+                continue
+            # table & frame: tidak konsumsi pending
+
+    walk(office_text)
+
+    # ---- pass B2: buang paragraf hampa murni (tanpa anak, teks whitespace)----
+    # Artefak rantai tex4ht/xtpipes pada dokumen besar (skripsi uji: ~450
+    # paragraf '       ' di dalam section env center + ~70 di list-item).
+    # LaTeX tidak bisa melahirkan paragraf whitespace-only — aman dibuang.
+    # PARENT table:table-cell dikecualikan: ODF mewajibkan >= 1 paragraf
+    # per sel tabel.
+    for p in list(root.iter(f'{{{TEXT_NS}}}p')):
+        if len(p) or (p.text or '').strip():
+            continue
+        par = parent.get(p)
+        if par is None or par.tag == CELL_TAG:
+            continue
+        par.remove(p)
 
     # ---- pass C: harden heading (align ditanam cfg -> tiap text:h) ----
     aligns = planted_heading_aligns(zin.read('styles.xml'))
@@ -323,6 +483,31 @@ def run(SRC, DST):
           f'(drop: inline={stats["drop_inline"]} vs={stats["drop_vs"]}, '
           f'komentar={stats["comments"]}); {n_wrapped} inline yatim dibungkus '
           f'(jenis: {sorted(kinds)})')
+
+
+def _is_marker_only(par):
+    """True bila text:p tidak punya konten apa pun selain komentar marker
+    (teks & tail whitespace saja, anak elemen semuanya komentar) — paragraf
+    hampa yang dilahirkan t4ht untuk membawa HCode marker di vmode."""
+    if (par.text or '').strip():
+        return False
+    for ch in par:
+        if ch.tag is not ET.Comment:
+            return False
+        if (ch.tail or '').strip():
+            return False
+    return True
+
+
+def _is_leading(par, node):
+    """True bila tidak ada konten (teks / elemen) sebelum `node` di `par` —
+    marker menempel di AWAL blok -> berlaku untuk blok ini."""
+    if (par.text or '').strip():
+        return False
+    for ch in list(par)[:list(par).index(node)]:
+        if ch.tag is not ET.Comment and ((ch.tail or '').strip() or True):
+            return False
+    return True
 
 
 def _is_trailing(par, node):

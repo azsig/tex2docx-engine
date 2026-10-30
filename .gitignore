@@ -13,3 +13,4 @@ build/
 *.lot
 *.lof
 *.nls
+.venv/
