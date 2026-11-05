@@ -149,13 +149,20 @@ flag.
   builds score 27–55 %, complete ones ~96 %). This catches cut-offs that
   leave balanced XML and no log warning — the validation thesis once stopped
   quietly at a figure on page 290 of 329.
-- `\includegraphics{../dir/figure.png}` (paths **outside** the project
-  directory) is legal for pdflatex, but tex4ht refuses to *create* its
-  `.4og` marker there and aborts at that page — the ODT still comes out
-  looking balanced, just silently cut off at the figure (the validation
-  thesis lost BAB V–VI this way). The pipeline pre-creates the 0-byte marker
-  at the path the document itself references (proactive scan + reactive log
-  parse) and retries.
+- **A missing figure kills `tex4ht`, not LaTeX** — this is why `--interaction
+  nonstopmode` alone wasn't enough. For every graphic in the DVI, tex4ht
+  `fopen`s its `.4og` instruction file and *dies hard* (`exit(EXIT_FAILURE)`
+  in tex4ht.c — `nonstopmode` is not in its vocabulary) when that open fails:
+  paths **outside** the project directory (legal for pdflatex, blocked for
+  tex4ht by its path security) or a figure **directory that doesn't exist**
+  (typo'd path, missing folder — pdflatex nonstopmode sails through and still
+  writes the PDF, while tex4ht aborts at that page and the rest of the
+  document is silently cut off; the validation thesis lost BAB V–VI this way).
+  The pipeline pre-creates the 0-byte marker (+ its directory) at every path
+  the document itself references (proactive scan of `\includegraphics` +
+  reactive log parse) and retries. `t4ht`, the last stage, never hard-exits on
+  images by itself (missing files are warnings there) and is run with `-g` so
+  a failed image-conversion system call doesn't stop the operations after it.
 - LibreOffice ODT→DOCX on documents with ~900 embedded Math objects can
   abort mid-import (exit 0, partial DOCX). Block-count validation alone is
   not enough — one abort kept 89 % of blocks and 97 % of text yet dropped

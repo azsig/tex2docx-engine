@@ -317,20 +317,26 @@ def _clean_t4ht_debris(workdir, main):
             pass
 
 
-def _prepare_outer_markers(workdir, mkout=''):
-    """tex4ht menolak MEMBUAT file marker `.4og` di luar workdir — path `..`
-    diblokir keamanannya — padahal `\\includegraphics{../dir/gambar.png}`
-    sah di LaTeX (pdflatex menerimanya). Akibatnya tex4ht abort di halaman
-    gambar itu ("Can't find/open file `../...'", error ini TIDAK diteruskan
-    ke stdout make4ht jadi tak bisa dideteksi reaktif), sisa dokumen hilang
-    atau XML-nya rusak (skripsi uji: mati di Gambar 5.7 -> BAB V-VI
-    terpotong). Solusi dua jalur, sama-sama pre-create marker 0-byte:
-    - proaktif: scan \\includegraphics{../...} di semua .tex workdir;
+def _prepare_graphic_markers(workdir, mkout=''):
+    r"""tex4ht membuka file instruksi grafik `.4og` dengan fopen(..., "w") untuk
+    SETIAP gambar yang ditemuinya di DVI — dan kegagalan fopen itu
+    (`bad_in_file` -> "Can't find/open file") adalah exit KERAS di tex4ht.c:
+    nonstopmode tidak ada dalam kosakatanya. Dua pemicu nyata:
+    - path di luar workdir — `\\includegraphics{../dir/gambar.png}` sah di
+      LaTeX (pdflatex menerimanya), tapi tex4ht diblokir keamanan path `..`;
+    - FOLDER gambar tidak ada / path salah ketik — pdflatex nonstopmode
+      berlalu dan tetap menulis PDF, tex4ht malah mati di halaman gambar itu
+      dan SISA DOKUMEN terpotong (skripsi uji: mati di Gambar 5.7 -> BAB V-VI
+      hilang). Gambar yang foldernya ada tapi filenya tidak, tidak berbahaya:
+      tex4ht sukses menulis markernya dan t4ht hanya memberi warning.
+    Solusi dua jalur, sama-sama pre-create marker 0-byte (+ makedirs folder):
+    - proaktif: scan \\includegraphics{...} di semua .tex workdir;
     - reaktif: parse error dari mkout (kalau kelihatan).
     Terverifikasi: tex4ht exit 1 di halaman 290 -> exit 0 sampai 329."""
     import re as _re
     rels = set(m.group(1) for m in
                _re.finditer(r"Can't find/open file `([^']+)'", mkout or ''))
+    rels = set(r[:-4] if r.endswith('.4og') else r for r in rels)  # nama marker
     rx_arg = _re.compile(r'\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}')
     for root, _dirs, files in os.walk(workdir):
         if '.git' in root or os.sep + '.' in root[len(workdir):]:
@@ -345,22 +351,22 @@ def _prepare_outer_markers(workdir, mkout=''):
                 continue
             for m in rx_arg.finditer(data):
                 arg = m.group(1).strip()
-                if arg.startswith('../') or '/../' in arg:
-                    rels.add(os.path.relpath(
-                        os.path.normpath(os.path.join(root, arg)), workdir))
+                rels.add(os.path.relpath(
+                    os.path.normpath(os.path.join(root, arg)), workdir))
     touched = []
     for rel in sorted(rels):
         target = os.path.normpath(os.path.join(workdir, rel))
         outer = (target.startswith(os.pardir + os.sep)
                  or os.sep + os.pardir + os.sep in target)
-        if not outer:
-            continue  # di dalam workdir — biarkan tex4ht yang mengurus
+        parent = os.path.dirname(target)
+        if not outer and os.path.isdir(parent):
+            continue  # di dalam workdir & foldernya ada — tex4ht urus sendiri
         base, ext = os.path.splitext(target)
         exts = [ext] if ext else ['.png', '.jpg', '.jpeg', '.pdf', '.eps']
         for e in exts:  # marker .4og menempel pada nama file GRAFIK, bukan
             cand = base + e + '.4og'   # meng-create grafik itu sendiri
             try:
-                os.makedirs(os.path.dirname(cand), exist_ok=True)
+                os.makedirs(parent, exist_ok=True)
                 if not os.path.exists(cand):
                     open(cand, 'a').close()
                     touched.append(os.path.relpath(cand, workdir))
@@ -377,7 +383,7 @@ def _make4ht_odt(workdir, main, mk, env, pdf_len=None):
     - "Can't find/open file `../...'": tex4ht abort di \includegraphics luar
       workdir — ODT bisa terbentuk seimbang tapi isinya berhenti di halaman
       gambar itu (skripsi uji: berhenti di Gambar 5.7, 76% dokumen).
-      _prepare_outer_markers menambal ini antar percobaan -> ulang.
+      _prepare_graphic_markers menambal ini antar percobaan -> ulang.
     - 'Unbalanced Tag' di log: bila content.xml ODT TIDAK lolos parse strict
       (luka struktural di tengah dokumen — dulu memotong 748/1625 paragraf)
       -> ulang. Bila lolos parse, domfilter make4ht sudah MENYEMBUHKAN XML
@@ -419,10 +425,10 @@ def _make4ht_odt(workdir, main, mk, env, pdf_len=None):
                       '(ujung dokumen) — make4ht menyembuhkannya, content.xml '
                       'valid & lengkap — lanjut')
             return odt
-        # `\includegraphics{../dir/x.png}` -> tex4ht tak bisa menulis marker
-        # .4og di luar workdir -> abort di halaman itu. Pre-create marker,
+        # `\includegraphics{../dir/x.png}` / folder gambar tak ada -> tex4ht
+        # abort di halaman itu saat fopen marker .4og. Pre-create marker,
         # percobaan berikutnya lewat.
-        for rel in _prepare_outer_markers(workdir, mkout):
+        for rel in _prepare_graphic_markers(workdir, mkout):
             print(f'[pipeline] grafik di luar workdir: {rel} — marker .4og '
                   f'dibuat agar tex4ht bisa lanjut')
         print(f'[pipeline] make4ht percobaan {attempt}: {bad} — '
@@ -492,8 +498,8 @@ def _convert(workdir, main, out, font, tmp, keep, pdf='auto',
     # yang recoverable — mis. \insertchapterspace undefined di cls custom).
     # Kriteria sukses tahap ini = <main>.odt terbentuk, parse-valid, dan
     # (mode hibrida) kontennya tak pendek vs oracle PDF.
-    for rel in _prepare_outer_markers(workdir):
-        print(f'[pipeline] grafik di luar workdir: {rel} — marker .4og '
+    for rel in _prepare_graphic_markers(workdir):
+        print(f'[pipeline] grafik tak tersentuh tex4ht: {rel} — marker .4og '
               f'dibuat agar tex4ht tidak abort di halaman gambar itu')
     pdf_len = (_pdf_text_len(pdf_path, _need('pdftotext'))
                if pdf_path else None)
@@ -505,6 +511,11 @@ def _convert(workdir, main, out, font, tmp, keep, pdf='auto',
     else:  # defensif: instalasi tanpa package-data — jalankan tanpa marker
         mk = [_need('make4ht'), '-f', 'odt', f'{main}.tex']
         print('[pipeline] t2dcfg.cfg tidak ada di paket — mode tanpa marker native')
+    # posisi argumen make4ht #3 = opsi t4ht. `-g` = system call konversi gambar
+    # yang gagal dianggap sukses — kegagalan konversi SATU gambar tidak
+    # menghentikan operasi t4ht berikutnya (nonstopmode untuk pembungkus;
+    # tex4ht-nya sendiri ditambal lewat _prepare_graphic_markers di atas).
+    mk += ['', '', '-g']
     # mode --interaction -> latex internal make4ht (via config XDG di tmp)
     env = _make4ht_env(workdir, tmp, interaction, env)
     odt = _make4ht_odt(workdir, main, mk, env, pdf_len=pdf_len)
