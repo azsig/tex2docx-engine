@@ -92,6 +92,18 @@ of yours still wins). One carve-out: if a `.make4ht` file exists in the project
 prints a notice and leaves that file in charge; `pdflatex` still honors the
 flag.
 
+**Why the mode alone isn't the whole story:** the make4ht chain has stages
+after LaTeX that don't understand `nonstopmode`. For every graphic in the DVI,
+`tex4ht` `fopen`s its `.4og` instruction file and *dies hard*
+(`exit(EXIT_FAILURE)` in tex4ht.c) when that open fails — a figure **directory
+that doesn't exist** (typo'd path, missing folder) or a path **outside** the
+project directory, both legal for pdflatex. The engine pre-creates the 0-byte
+marker (+ its directory) at every path the document references (proactive scan
+of `\includegraphics` + reactive log parse) so the conversion keeps going past
+the bad figure, like pdflatex does. `t4ht`, the packaging stage, never
+hard-exits on images by itself and is run with `-g` so a failed image
+conversion doesn't stop the operations after it.
+
 ## What the oracle measures
 
 | Oracle | PDF source | Planted as |

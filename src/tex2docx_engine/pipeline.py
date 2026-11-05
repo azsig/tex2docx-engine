@@ -143,6 +143,63 @@ def _make4ht_env(workdir, tmp, interaction, env=None, home=None, xdg=None):
     return env
 
 
+def _prepare_graphic_markers(workdir, mkout=''):
+    r"""tex4ht membuka file instruksi grafik `.4og` dengan fopen(..., "w") untuk
+    SETIAP gambar yang ditemuinya di DVI — dan kegagalan fopen itu
+    (`bad_in_file` -> "Can't find/open file") adalah exit KERAS di tex4ht.c:
+    nonstopmode tidak ada dalam kosakatanya. Dua pemicu nyata:
+    - path di luar workdir — `\\includegraphics{../dir/gambar.png}` sah di
+      LaTeX (pdflatex menerimanya), tapi tex4ht diblokir keamanan path `..`;
+    - FOLDER gambar tidak ada / path salah ketik — pdflatex nonstopmode
+      berlalu dan tetap menulis PDF, tex4ht malah mati di halaman gambar itu
+      dan SISA DOKUMEN terpotong. Gambar yang foldernya ada tapi filenya
+      tidak, tidak berbahaya: tex4ht sukses menulis markernya dan t4ht hanya
+      memberi warning.
+    Solusi: pre-create marker 0-byte (+ makedirs folder) untuk semua path yang
+    dirujuk dokumen — proaktif dari scan \\includegraphics, reaktif dari
+    parse error di mkout."""
+    import re as _re
+    rels = set(m.group(1) for m in
+               _re.finditer(r"Can't find/open file `([^']+)'", mkout or ''))
+    rels = set(r[:-4] if r.endswith('.4og') else r for r in rels)  # nama marker
+    rx_arg = _re.compile(r'\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}')
+    for root, _dirs, files in os.walk(workdir):
+        if '.git' in root or os.sep + '.' in root[len(workdir):]:
+            continue
+        for name in files:
+            if not name.endswith('.tex'):
+                continue
+            try:
+                data = open(os.path.join(root, name), encoding='utf-8',
+                            errors='replace').read()
+            except OSError:
+                continue
+            for m in rx_arg.finditer(data):
+                arg = m.group(1).strip()
+                rels.add(os.path.relpath(
+                    os.path.normpath(os.path.join(root, arg)), workdir))
+    touched = []
+    for rel in sorted(rels):
+        target = os.path.normpath(os.path.join(workdir, rel))
+        outer = (target.startswith(os.pardir + os.sep)
+                 or os.sep + os.pardir + os.sep in target)
+        parent = os.path.dirname(target)
+        if not outer and os.path.isdir(parent):
+            continue  # di dalam workdir & foldernya ada — tex4ht urus sendiri
+        base, ext = os.path.splitext(target)
+        exts = [ext] if ext else ['.png', '.jpg', '.jpeg', '.pdf', '.eps']
+        for e in exts:  # marker .4og menempel pada nama file GRAFIK, bukan
+            cand = base + e + '.4og'   # meng-create grafik itu sendiri
+            try:
+                os.makedirs(parent, exist_ok=True)
+                if not os.path.exists(cand):
+                    open(cand, 'a').close()
+                    touched.append(os.path.relpath(cand, workdir))
+            except OSError:
+                pass
+    return touched
+
+
 def _ensure_pdf(workdir, main, interaction='nonstopmode'):
     """PDF = oracle; butuh >= 2 run pdflatex agar .toc/.lot/.lof terisi.
     Bila ada .bib (dan .bbl belum ada), jalankan bibtex di antaranya.
@@ -202,9 +259,16 @@ def _convert(workdir, main, out, font, tmp, keep, interaction='nonstopmode'):
     # Kriteria sukses tahap ini = <main>.odt terbentuk. Mode --interaction
     # diinjeksi ke latex internalnya lewat config make4ht yang dibuat di tmp
     # (default make4ht = batchmode senyap — lihat _make4ht_env).
+    for rel in _prepare_graphic_markers(workdir):
+        print(f'[pipeline] grafik tak tersentuh tex4ht: {rel} — marker .4og '
+              f'dibuat agar tex4ht tidak abort di halaman gambar itu')
     odt = os.path.join(workdir, f'{main}.odt')
     before = os.path.getmtime(odt) if os.path.isfile(odt) else 0
-    r = subprocess.run([_need('make4ht'), '-f', 'odt', f'{main}.tex'],
+    # posisi argumen make4ht #3 = opsi t4ht. `-g` = system call konversi gambar
+    # yang gagal dianggap sukses — kegagalan konversi SATU gambar tidak
+    # menghentikan operasi t4ht berikutnya (nonstopmode untuk pembungkus
+    # terakhir; tex4ht-nya sendiri ditambal lewat _prepare_graphic_markers).
+    r = subprocess.run([_need('make4ht'), '-f', 'odt', f'{main}.tex', '', '', '-g'],
                        cwd=workdir, env=_make4ht_env(workdir, tmp, interaction),
                        capture_output=True, text=True)
     if not (os.path.isfile(odt) and os.path.getmtime(odt) > before):
