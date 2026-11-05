@@ -94,6 +94,35 @@ LibreOffice but no poppler/pdflatex. Page breaks then come only from
 `\newpage`-family markers and tex4ht's per-chapter breaks; spacing and
 alignment are fully native.
 
+### Interaction mode (`--interaction`, default `nonstopmode`)
+
+Same contract as the real TeX flag, applied to every TeX run the pipeline
+makes:
+
+- **`nonstopmode`** (default) — recoverable TeX errors don't kill the
+  conversion. This is what `-interaction=nonstopmode` actually does: pdflatex
+  recovers and still writes the PDF *while exiting 1*, so exit codes are only
+  reported as warnings; the final artifacts (PDF, ODT, DOCX) decide whether the
+  run passed — the same artifact-based judgement the make4ht/LibreOffice gates
+  already apply. A fatal failure (no PDF at all) is diagnosed from the tail of
+  `<main>.log`. Works in `--no-pdf` mode too, where it governs the make4ht run.
+- **`errorstopmode`** — strict: the first nonzero engine exit aborts, like the
+  interactive TeX stopping at the first error.
+- **`batchmode` / `scrollmode`** — same tolerance as nonstopmode; the mode is
+  passed through to the engines verbatim.
+
+The mode reaches `pdflatex` as `-interaction=<mode>` and also the LaTeX run
+*inside* `make4ht` — which has no CLI flag for it and silently uses `batchmode`
+(meaning its recoverable errors were invisible in the captured output; with
+`nonstopmode` they surface and feed the retry gates' diagnostics). The engine
+injects it through a generated make4ht config (`XDG_CONFIG_HOME` points into
+the engine's temp dir; your own `~/.config/make4ht/config.lua` content is
+preserved below the injected assignment, so an explicit preference of yours
+still wins). One carve-out: if a `.make4ht` file exists in the project (or a
+parent), make4ht prioritizes it and ignores the XDG config — the pipeline
+prints a notice and leaves that file in charge; `pdflatex` still honors the
+flag.
+
 ### Robustness notes (learned the hard way, on the 85-page validation thesis)
 
 - t4ht **can** emit unbalanced XML, and the pipeline no longer judges the run
