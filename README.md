@@ -67,6 +67,31 @@ convert('path/to/project', main='skripsi', out='skripsi_engine.docx')
 Each layer is also callable on its own (`tex2docx_engine.polish/typography/graft`),
 e.g. when your app already produces the raw DOCX and the PDF separately.
 
+### Interaction mode (`--interaction`, default `nonstopmode`)
+
+Same contract as the real TeX flag, applied to every engine the pipeline runs:
+
+- **`nonstopmode`** (default) — recoverable TeX errors don't kill the
+  conversion. This is what `-interaction=nonstopmode` actually does: pdflatex
+  recovers and still writes the PDF *while exiting 1*, so exit codes are only
+  reported as warnings; the final artifacts (PDF, ODT, DOCX) decide whether the
+  run passed. A fatal failure (no PDF at all) is diagnosed from the tail of
+  `<main>.log`.
+- **`errorstopmode`** — strict: the first nonzero engine exit aborts, like the
+  interactive TeX stopping at the first error.
+- **`batchmode` / `scrollmode`** — same tolerance as nonstopmode; the mode is
+  passed through to the engines verbatim.
+
+The mode reaches `pdflatex` as `-interaction=<mode>` and also the LaTeX run
+*inside* `make4ht` — which has no CLI flag for it and silently uses `batchmode`.
+The engine injects it through a generated make4ht config (`XDG_CONFIG_HOME`
+points into the engine's temp dir; your own `~/.config/make4ht/config.lua`
+content is preserved below the injected assignment, so an explicit preference
+of yours still wins). One carve-out: if a `.make4ht` file exists in the project
+(or a parent), make4ht prioritizes it and ignores the XDG config — the pipeline
+prints a notice and leaves that file in charge; `pdflatex` still honors the
+flag.
+
 ## What the oracle measures
 
 | Oracle | PDF source | Planted as |
