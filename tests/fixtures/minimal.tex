@@ -12,7 +12,7 @@
 
 \vspace{0.5cm}
 
-by Alpha One
+by Alpha One \\[0.5cm] second line via optional break
 \end{center}
 
 \begin{abstract}
@@ -25,6 +25,17 @@ still producing a multi-featured PDF for the layout oracle to measure.
 Body text with a first-line indent follows the heading. The oracle should
 measure the vertical gap above this section heading and transplant it into
 the DOCX as paragraph spacing, purely from PDF geometry.
+
+\vskip 6pt
+
+After a primitive \verb|\vskip| (native marker path).
+
+{\centering Group-centered line one.
+
+Group-centered line two
+\par}
+
+Back to justified text.
 
 \subsection{Sub}
 More body text. Justified paragraphs whose lines start at the margin must not
