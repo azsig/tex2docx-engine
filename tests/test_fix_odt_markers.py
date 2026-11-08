@@ -329,3 +329,82 @@ def test_paragraf_whitespace_dibuang_kecuali_sel_tabel(tmp_path):
     assert len(n) == 2                     # 'Isi.' + paragraf wajib sel tabel
     assert 'Isi.' in c
     assert "<table:table-cell><text:p" in c  # sel tetap punya paragrafnya
+
+
+# ---- regresi tail: remove() polos pada komentar membuang teks sesudahnya ----
+# ET menaruh teks setelah komentar pada .tail komentar; par.remove(komentar)
+# dulu melahap baris sesudah marker intra-paragraf di halaman judul skripsi
+# (hanya teks dalam <text:span> yang selamat) — lihat _remove_keep_tail.
+
+def test_tail_teks_setelah_marker_intra_paragraf_selamat(tmp_path):
+    """Bentuk halaman judul: baris dipisah <text:line-break/> lalu marker
+    vs intra-paragraf; SEMUA baris harus tetap ada."""
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = ("<text:p text:style-name='center'>"
+            "untuk memenuhi sebagian persyaratan"
+            "<text:line-break/><!--t2dvs:0.0pt-->untuk memperoleh derajat Sarjana"
+            "<text:line-break/><!--t2dvs:0.0pt-->Program Studi Teknik Fisika"
+            "</text:p>")
+    build_odt(str(src), body)
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    for txt in ('untuk memenuhi sebagian persyaratan',
+                'untuk memperoleh derajat Sarjana',
+                'Program Studi Teknik Fisika'):
+        assert txt in c, txt
+
+
+def test_tail_teks_setelah_komentar_debug_tex4ht_selamat(tmp_path):
+    """Komentar debug 'l. N' tex4ht di dalam paragraf sel tabel — teks sel
+    menempel pada tail komentar (bentuk build make4ht tertentu)."""
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = ("<table:table table:name='t1'><table:table-row>"
+            "<table:table-cell><text:p text:style-name='Text-body'>"
+            "<!-- l. 580 -->Nama"
+            "</text:p></table:table-cell>"
+            "<table:table-cell><text:p text:style-name='Text-body'>"
+            "<!-- l. 580 -->: "
+            "</text:p></table:table-cell>"
+            "<table:table-cell><text:p text:style-name='Text-body'>"
+            "<!-- l. 580 -->Yasir Abdulaziz"
+            "</text:p></table:table-cell>"
+            "</table:table-row></table:table>")
+    build_odt(str(src), body)
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    for txt in ('Nama', ': ', 'Yasir Abdulaziz'):
+        assert txt in c, txt
+
+
+def test_tail_marker_antar_blok_dan_paragraf_marker_only_selamat(tmp_path):
+    """Komentar antar blok (walk) dan paragraf marker-only (absorb) juga
+    dibuang via _remove_keep_tail — tail teksnya harus tetap ada."""
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = (f"{P('Satu.')}"
+            "<!--t2dvs:10pt-->tail-antar-blok"
+            "<text:p text:style-name='Text-body'><!--t2dalign:center--></text:p>"
+            "tail-marker-only"
+            f"{P('Dua.')}")
+    build_odt(str(src), body)
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    assert 'tail-antar-blok' in c
+    assert 'tail-marker-only' in c
+    assert 'Dua.' in c
+    assert 'fo:margin-top="10.0pt"' in c
+
+
+def test_tail_spans_setelah_marker_intra_paragraf_selamat(tmp_path):
+    """Span SETELAH marker intra-paragraf tetap terbawa (elemen tak pernah
+    jadi tail — ini yang dulu 'kebetulan' selamat di halaman judul)."""
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = ("<text:p text:style-name='center'>diajukan oleh"
+            "<text:line-break/><!--t2dvs:0.0pt-->"
+            "<text:span text:style-name='ptmb8t-x-x-120'>DEPARTEMEN</text:span>"
+            "<text:line-break/><!--t2dvs:0.0pt-->FAKULTAS TEKNIK"
+            "</text:p>")
+    build_odt(str(src), body)
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    for txt in ('diajukan oleh', 'DEPARTEMEN', 'FAKULTAS TEKNIK'):
+        assert txt in c, txt

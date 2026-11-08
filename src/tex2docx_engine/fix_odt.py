@@ -134,6 +134,30 @@ def parse_with_comments(xml_text):
     return ET.fromstring(xml_text, parser=parser)
 
 
+def _remove_keep_tail(parent, node):
+    """Buang `node` dari `parent` TANPA membuang teks sesudahnya.
+
+    ElementTree menempelkan teks yang mengikuti sebuah anak pada atribut
+    `.tail` anak itu — `remove()` polos ikut membuang tail bersama elemen.
+    Ini pernah melahap baris sesudah marker intra-paragraf di halaman judul
+    (teks polos setelah <!--t2dvs-->: "untuk memperoleh derajat …", nama,
+    NIM — hanya teks dalam <text:span> yang selamat) dan sel tabel pada
+    build make4ht yang menaruh teks sel setelah komentar debug 'l. N'.
+    Tail digulung ke tail kakak sebelumnya (atau text parent bila anak
+    pertama); tail node dinolkan agar aman bila node dipindah, bukan dibuang."""
+    tail = node.tail
+    if tail:
+        kids = list(parent)
+        i = kids.index(node)
+        if i:
+            prev = kids[i - 1]
+            prev.tail = (prev.tail or '') + tail
+        else:
+            parent.text = (parent.text or '') + tail
+    node.tail = None
+    parent.remove(node)
+
+
 def planted_heading_aligns(styles_xml):
     """Scan styles.xml: Heading-1..4 yang fo:text-align-nya ditanam t2dcfg.
     Return {nama style: nilai align}.
@@ -234,7 +258,7 @@ def run(SRC, DST):
             # isi bab, semua Heading-2 jadi center padahal kiri di PDF.)
             continue
         if not RE_T2D_ANY.search(txt):
-            par.remove(node)
+            _remove_keep_tail(par, node)
             continue
         if par.tag in CONTENT_TAGS and _is_marker_only(par):
             marker_only.add(id(par))
@@ -276,7 +300,7 @@ def run(SRC, DST):
                     trailing_brk.add(id(block))
             else:
                 stats['drop_inline'] += 1
-        par.remove(node)
+        _remove_keep_tail(par, node)
 
     # ---- pass B: state machine atas isi <office:text>, REKURSIF ----
     # Dua sumber marker BERGABUNG di sini: (a) komentar antar blok (anak
@@ -366,14 +390,14 @@ def run(SRC, DST):
         trailing_brk.discard(id(el))
         open_scope.pop(id(el), None)
         close_after.discard(id(el))
-        container.remove(el)
+        _remove_keep_tail(container, el)
 
     def walk(container):
         for el in list(container):
             if el.tag is ET.Comment:
                 # komentar antar blok = marker
                 txt = el.text or ''
-                container.remove(el)
+                _remove_keep_tail(container, el)
                 m = RE_VS.search(txt)
                 if m:
                     state['vs'].append(float(m.group(1)))
@@ -420,7 +444,7 @@ def run(SRC, DST):
         par = parent.get(p)
         if par is None or par.tag == CELL_TAG:
             continue
-        par.remove(p)
+        _remove_keep_tail(par, p)
 
     # ---- pass C: harden heading (align ditanam cfg -> tiap text:h) ----
     aligns = planted_heading_aligns(zin.read('styles.xml'))
@@ -449,6 +473,9 @@ def run(SRC, DST):
                 return
             for el in runs:
                 kinds.add(el.tag.split('}')[-1])
+                # remove polos disengaja (bukan _remove_keep_tail): tail el
+                # ikut terbawa saat el di-append ke paragraf pembungkus, jadi
+                # teks yang mengikuti span yatim terselamatkan DI DALAM blok.
                 container.remove(el)
             p = ET.Element(f'{{{TEXT_NS}}}p')
             for el in runs:
