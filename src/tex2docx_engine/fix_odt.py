@@ -134,6 +134,85 @@ def parse_with_comments(xml_text):
     return ET.fromstring(xml_text, parser=parser)
 
 
+TEXT_P = f'{{{TEXT_NS}}}p'
+
+
+def _unwrap_nested_p(root):
+    """Ratakan <text:p> di dalam <text:p> — ODF melarangnya, dan LibreOffice
+    MENGHABISI paragraf dalam saat export DOCX (build make4ht tertentu,
+    v0.4e: seluruh isi sel tabel jadi nested p — 120 paragraf lenyap, sel
+    tampak kosong berisi spasi wrapper 'sty-11L' saja).
+
+    Paragraf dalam diangkat jadi saudara paragraf luar; inline lain di
+    sekitarnya (teks/elemen non-p) dijahit jadi paragraf sintetik pembawa
+    style paragraf luar — run whitespace murni dibuang (artefak wrapper).
+    Return jumlah paragraf luar yang diratakan."""
+    n = 0
+    parent = {c: p for p in root.iter() for c in p}
+    for p in list(root.iter(TEXT_P)):
+        if not any(ch.tag == TEXT_P for ch in p):
+            continue
+        holder = parent.get(p)
+        if holder is None:
+            continue
+        idx = list(holder).index(p)
+        style = p.get(f'{{{TEXT_NS}}}style-name')
+
+        def synth_from(buf):
+            """Paragraf pembawa style luar dari run inline `buf`
+            [(kind, payload)] — None bila run whitespace murni."""
+            if not any(k == 'e' for k, _ in buf) and \
+                    not any((s or '').strip() for k, s in buf if k == 't'):
+                return None
+            sp = ET.Element(TEXT_P)
+            if style:
+                sp.set(f'{{{TEXT_NS}}}style-name', style)
+            anchor = None            # elemen terakhir (untuk tail teks)
+            for k, s in buf:
+                if k == 't':
+                    if anchor is None:
+                        sp.text = (sp.text or '') + s
+                    else:
+                        anchor.tail = (anchor.tail or '') + s
+                else:
+                    sp.append(s)
+                    anchor = s
+            return sp
+
+        # alirkan konten luar jadi run inline + paragraf dalam
+        stream = [('t', p.text)] if p.text else []
+        for ch in p:
+            stream.append(('e', ch))
+            if ch.tail:
+                stream.append(('t', ch.tail))
+                ch.tail = None
+        runs, out = [], []
+        for k, payload in stream:
+            if k == 'e' and payload.tag == TEXT_P:
+                sp = synth_from(runs)
+                if sp is not None:
+                    out.append(sp)
+                runs = []
+                out.append(payload)
+            else:
+                runs.append((k, payload))
+        sp = synth_from(runs)
+        if sp is not None:
+            out.append(sp)
+        if not out:                  # tak mungkin (ada inner p), jaga-jaga
+            continue
+        tail = p.tail
+        p.tail = None
+        holder.remove(p)
+        for off, node in enumerate(out):
+            holder.insert(idx + off, node)
+            parent[node] = holder   # peta induk ikut berpindah (nesting >2 level)
+        if tail:
+            out[-1].tail = (out[-1].tail or '') + tail
+        n += 1
+    return n
+
+
 def _remove_keep_tail(parent, node):
     """Buang `node` dari `parent` TANPA membuang teks sesudahnya.
 
@@ -205,6 +284,13 @@ def run(SRC, DST):
     if office_text is None:
         print('[fix_odt] <office:text> tidak ketemu — tidak ada yang diubah')
         return
+
+    # ---- pass 0: ratakan text:p bersarang (sebelum marker: marker di dalam
+    # paragraf inner lalu diklasifikasi terhadap paragrafnya sendiri).
+    n_flat = _unwrap_nested_p(root)
+    if n_flat:
+        print(f'[fix_odt] ratakan p-dalam-p: {n_flat} (ODF melarang, '
+              f'LibreOffice membuang paragraf dalam)')
 
     stats = dict(margin=0, align=0, brk=0, drop_inline=0, drop_vs=0,
                  hardened=0, comments=0)
@@ -436,9 +522,22 @@ def run(SRC, DST):
     # Artefak rantai tex4ht/xtpipes pada dokumen besar (skripsi uji: ~450
     # paragraf '       ' di dalam section env center + ~70 di list-item).
     # LaTeX tidak bisa melahirkan paragraf whitespace-only — aman dibuang.
-    # PARENT table:table-cell dikecualikan: ODF mewajibkan >= 1 paragraf
-    # per sel tabel.
-    for p in list(root.iter(f'{{{TEXT_NS}}}p')):
+    # PARENT table:table-cell khusus: ODF mewajibkan >= 1 paragraf per sel —
+    # buang paragraf whitespace hanya bila sel masih punya paragraf berkonten
+    # (sisa wrapper hampa 'sty-11L' dari rata-p), sisakan 1 bila sel murni
+    # hampa.
+    for cell in list(root.iter(CELL_TAG)):
+        ps = [q for q in cell if q.tag == TEXT_P]
+        content = [q for q in ps if len(q) or (q.text or '').strip()]
+        if content:
+            victims = [q for q in ps if q not in content]
+        elif len(ps) > 1:
+            victims = ps[1:]
+        else:
+            victims = []
+        for q in victims:
+            _remove_keep_tail(cell, q)
+    for p in list(root.iter(TEXT_P)):
         if len(p) or (p.text or '').strip():
             continue
         par = parent.get(p)

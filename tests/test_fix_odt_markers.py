@@ -408,3 +408,82 @@ def test_tail_spans_setelah_marker_intra_paragraf_selamat(tmp_path):
     c = content_of(dst)
     for txt in ('diajukan oleh', 'DEPARTEMEN', 'FAKULTAS TEKNIK'):
         assert txt in c, txt
+
+
+# ---- regresi nested-p: make4ht tertentu (v0.4e) melahirkan <text:p> di
+# dalam <text:p> pada sel tabel — ODF melarang, LibreOffice membuang
+# paragraf dalam saat export DOCX (sel jadi kosong). fix_odt meratakannya.
+
+def _no_nested_p(c):
+    import xml.etree.ElementTree as _ET
+    root = _ET.fromstring(c.encode('utf-8'))
+    P = f'{{{NS_TEXT}}}p'
+    return not any(ch.tag == P for p in root.iter(P) for ch in p)
+
+
+def test_nested_p_sel_tabel_dipipihkan(tmp_path):
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = ("<table:table table:name='t1'><table:table-row>"
+            + ''.join(
+                "<table:table-cell>"
+                "<text:p text:style-name='sty-11L'>  <!--   l. 3   -->"
+                f"<text:p text:style-name='Text-body'>{txt}      </text:p> "
+                "</text:p></table:table-cell>"
+                for txt in ('Nama', ': ', 'Yasir Abdulaziz'))
+            + "</table:table-row></table:table>")
+    build_odt(str(src), body)
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    assert _no_nested_p(c)
+    for txt in ('Nama', ': ', 'Yasir Abdulaziz'):
+        assert txt in c, txt
+    # wrapper hampa 'sty-11L' dibuang — sel tinggal SATU paragraf berisi teks
+    import re as _re
+    assert len(_re.findall(r'<table:table-cell>.*?</table:table-cell>',
+                           c, _re.S)) == 3
+    for cellm in _re.finditer(r'<table:table-cell>(.*?)</table:table-cell>',
+                              c, _re.S):
+        assert len(_re.findall(r'<text:p[ >]', cellm.group(1))) == 1
+
+
+def test_nested_p_inline_luar_dijahit_paragraf_sintetik(tmp_path):
+    """Teks/elemen inline DI SEKITAR paragraf dalam tidak boleh hilang."""
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = ("<text:p text:style-name='Text-body'>awal "
+            "<text:p text:style-name='Text-body'>dalam</text:p>"
+            " akhir</text:p>")
+    build_odt(str(src), f"{P('Sebelum.')}{body}{P('Sesudah.')}")
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    assert _no_nested_p(c)
+    for txt in ('awal', 'dalam', 'akhir', 'Sebelum.', 'Sesudah.'):
+        assert txt in c, txt
+    assert c.index('awal') < c.index('dalam') < c.index('akhir')
+
+
+def test_nested_p_tiga_level_dipipihkan_semua(tmp_path):
+    body = ("<text:p text:style-name='a'>"
+            "<text:p text:style-name='b'>"
+            "<text:p text:style-name='c'>inti</text:p>"
+            "</text:p></text:p>")
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    build_odt(str(src), f"{P('Luar.')}{body}")
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    assert _no_nested_p(c)
+    assert 'inti' in c
+
+
+def test_sel_whitespace_murni_tetap_punya_paragraf(tmp_path):
+    """Sel yang memang hampa harus tetap menyisakan >= 1 paragraf (ODF)."""
+    src, dst = tmp_path / 'a.odt', tmp_path / 'b.odt'
+    body = ("<table:table table:name='t1'><table:table-row>"
+            "<table:table-cell><text:p> </text:p></table:table-cell>"
+            "<table:table-cell><text:p>Nama</text:p></table:table-cell>"
+            "</table:table-row></table:table>")
+    build_odt(str(src), body)
+    fix_odt.run(str(src), str(dst))
+    c = content_of(dst)
+    assert "<table:table-cell><text:p" in c or \
+        '<table:table-cell><text:p' in c
+    assert 'Nama' in c
