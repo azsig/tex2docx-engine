@@ -82,7 +82,14 @@ def run(SRC, DST, FONT='Times New Roman'):
             return d
         cx, cy = int(m.group(1)), int(m.group(2))
         ncx, ncy, ratio = cx, cy, cy / cx
-        if cx > 25 * EMU_CM and 0.8 < ratio < 1.25:      # logo persegi raksasa -> 5.5 cm
+        # Logo: dideteksi lewat NAMA gambar (docPr name, mis. 'logoUGM.png')
+        # ATAU bentuk persegi raksasa. Jalur nama penting: export LibreOffice
+        # tertentu menulis extent bawaan frame ODT (~14.6 cm) sehingga logo
+        # tak pernah menyentuh ambang 25 cm — halaman judul meluber ke hal. 2.
+        nm = re.search(r'<wp:docPr[^>]*\bname="([^"]*)"', d)
+        is_logo = bool(nm and 'logo' in nm.group(1).lower())
+        if (is_logo or cx > 25 * EMU_CM) and 0.5 < ratio < 2.0 \
+                and cx > 2 * LOGO_CM * EMU_CM:
             ncx, ncy = int(LOGO_CM * EMU_CM), int(LOGO_CM * EMU_CM * ratio)
         else:
             if cx > MAX_W_CM * EMU_CM:
