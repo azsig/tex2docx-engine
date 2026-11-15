@@ -34,7 +34,11 @@ dicocokkan ke paragraf DOCX dan diberi page-break.
   intra-paragraf). LO menulis literal "0" bila tak ada -> >= 1 = pasti native.
   Baris PERTAMA tiap halaman di-skip (jaraknya ke header/top, bukan antar-paragraf;
   paginasinya sudah ditangani page-break oracle). Jarak sangat besar (>= 40pt)
-  dilewati: biasanya area gambar/tabel yang tak punya teks di bbox.
+  dilewati: biasanya area gambar/tabel yang tak punya teks di bbox. Pencarian
+  paragraf penghasil baris PDF dibatasi jendela maju (60 paragraf) — teks label
+  di dalam gambar TikZ tidak ada sebagai paragraf DOCX, dan tanpa jendela satu
+  baris begitu bisa nyangkut di kecocokan jauh di depan (sel tabel) sehingga
+  kursor melompat dan seluruh rentang halaman di antaranya kelewat oracle.
   Bonus dari koordinat-x: paragraf yang baris pertamanya mulai DI MARGIN
   (delta < 15pt) dipastikan tanpa w:firstLine — parindent nyata ~35pt —
   menggantikan detektor kata "kata kunci/keywords" yang lama.
@@ -47,6 +51,28 @@ import sys
 import unicodedata
 import zipfile
 from collections import Counter
+
+
+def _find_line_target(ln, para_texts, idxs, vcur, window=60):
+    """Paragraf DOCX penghasil baris PDF `ln` — dicari MAJU TERBATAS dari
+    kursor `vcur`. Teks di dalam gambar (mis. label kotak diagram TikZ ->
+    SVG) tidak ada sebagai paragraf DOCX di sekitar kursor; pencarian tanpa
+    batas membuat baris begitu nyangkut di paragraf jauh di depan (mis. sel
+    tabel ber-teks sama) — kursor melompat ratusan paragraf dan seluruh
+    rentang di antaranya kelewat oracle. 60 paragraf ~ beberapa halaman;
+    lebih dari itu dianggap tak ada pasangannya (skip — kursor diam).
+    Mengembalikan indeks J di idxs, atau None."""
+    for j in range(vcur, min(vcur + window, len(idxs))):
+        t = para_texts[idxs[j]]
+        # dua arah: baris PDF bisa melebihi satu paragraf DOCX (sel tabel:
+        # 'Pembimbing Utama : Dr. ...' = 3 sel) — cukup sel pertamanya awalan
+        if t and (t == ln or (len(ln) >= 12 and
+                              (t.startswith(ln[:16]) or
+                               (len(t) >= 8 and ln.startswith(t[:16]))))):
+            return j
+    return None
+
+
 def run(PDF, SRC, DST, TOC=""):
 
     def norm(s):
@@ -530,16 +556,7 @@ def run(PDF, SRC, DST, TOC=""):
             ln = norm(b['t'])
             if len(ln) < 2:
                 continue                       # 'by' (abstract EN) tetap tertangkap via equality
-            tgt = None
-            for j in range(vcur, len(idxs)):
-                t = para_texts[idxs[j]]
-                # dua arah: baris PDF bisa melebihi satu paragraf DOCX (sel tabel:
-                # 'Pembimbing Utama : Dr. ...' = 3 sel) — cukup sel pertamanya awalan
-                if t and (t == ln or (len(ln) >= 12 and
-                                      (t.startswith(ln[:16]) or
-                                       (len(t) >= 8 and ln.startswith(t[:16]))))):
-                    tgt = j
-                    break
+            tgt = _find_line_target(ln, para_texts, idxs, vcur)
             if tgt is None:
                 continue
             tw = int(round(extra * 20))

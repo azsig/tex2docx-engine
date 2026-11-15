@@ -15,6 +15,9 @@ Aturan:
        indent baris pertama 3em + spasi 1.5, TANPA spacing antar paragraf (perilaku PDF)
      - surat/daftar (judul, pernyataan, pengesahan): spacing antar paragraf
      Isi BAB: justify + first-line indent 3em (tanpa spacing)
+     Paragraf list (w:numPr / pStyle *itemize*enumerate): 1.5 spasi + justify
+     TANPA first-line (indentasi hanging bullet/nomor tetap utuh); w:spacing
+     di-merge atributnya sehingga w:before/w:after paragraf tidak hilang.
   E. (dihapus) Perataan byline abstrak & indent baris kata kunci kini murni
      GEOMETRI PDF (graft_pdf_layout.py) — bukan detektor kata.
 Pemakaian: python3 typography_docx.py <in.docx> <out.docx> <dir_toc> <prefix_toc>
@@ -199,8 +202,13 @@ def run(SRC, DST, BASE, TOCBASE):
         """Batas blok daftar: heading section berikutnya (nama daftar dari konstanta
         TOC_HEADS, atau entri bab level-0 dari .toc — keduanya struktural).
         Bila tepat sebelum heading itu ada rangkaian <= 6 paragraf NON-entri
-        (byline abstrak berada di antara daftar terakhir dan heading abstrak),
-        batas naik ke awal rangkaian supaya byline tidak ikut terhapus."""
+        PENDEK (byline abstrak berada di antara daftar terakhir dan heading
+        abstrak), batas naik ke awal rangkaian supaya byline tidak ikut terhapus.
+        Byline selalu baris pendek; paragraf PANJANG di posisi itu adalah sisa
+        konten daftar lama yang lolos entry_like (gumpalan span yatim nomencl
+        hasil wrap_orphans fix_odt, 800-2600+ karakter, tanpa <w:tab/> dan tanpa
+        nomor halaman) — walk berhenti di situ sehingga gumpalan ikut terganti,
+        bukan dianggap bagian dari byline."""
         P = pidx()
         ordn = {k: n for n, k in enumerate(P)}
         head = next((k for k in P if k > lo and
@@ -211,7 +219,8 @@ def run(SRC, DST, BASE, TOCBASE):
         start = head
         hi = ordn[head]
         for q in (P[hi - 1:hi - 7:-1] if hi else []):
-            if q <= lo or not ptext(segs[q][1]) or entry_like(q):
+            t = ptext(segs[q][1])
+            if q <= lo or not t or entry_like(q) or len(t) > 300:
                 break
             start = q
         return start
@@ -359,6 +368,19 @@ def run(SRC, DST, BASE, TOCBASE):
             return raw[:m.end()] + '<w:pPr>' + ''.join(additions) + '</w:pPr>' + raw[m.end():]
         for add in additions:
             tag = re.match(r'<(w:\w+)', add).group(1)
+            if tag == 'w:spacing' and add.endswith('/>'):
+                mold = re.search(r'<w:spacing\b[^>]*/>', raw)
+                if mold:
+                    # spacing di-MERGE atributnya, bukan ditimpa: w:before /
+                    # w:after milik paragraf (spacing list dari LO seperti
+                    # w:before="100", jarak vertikal terukur graft pada
+                    # konversi ulang) wajib lestari saat LINE_15 hanya
+                    # menambah w:line. Nilai yang baru menang bila bentrok.
+                    attrs = dict(re.findall(r'(w:\w+)="([^"]*)"', mold.group(0)))
+                    attrs.update(re.findall(r'(w:\w+)="([^"]*)"', add))
+                    merged = ''.join(f' {a}="{v}"' for a, v in attrs.items())
+                    raw = raw[:mold.start()] + f'<w:spacing{merged}/>' + raw[mold.end():]
+                    continue
             raw = re.sub(f'<{tag}[^>]*/>|<{tag}[^>]*>.*?</{tag}>', '', raw, flags=re.S)
             later = PPR_ORDER[PPR_ORDER.index(tag) + 1:]
             m = re.search(r'<w:pPr[^>]*>', raw)
@@ -378,16 +400,27 @@ def run(SRC, DST, BASE, TOCBASE):
     PROSE_RE = re.compile(r'PENGANTAR|PRAKATA|FOREWORD|PERSEMBAHAN|DEDICAT|MOTTO|'
                           r'INTISARI|ABSTRAK|ABSTRACT|RINGKASAN|R[ÉE]SUM[ÉE]', re.I)
 
-    n_prose = n_letter = n_body = 0
+    n_prose = n_letter = n_body = n_list = 0
     sec_prose = False
     for k in pidx():
         t = ptext(segs[k][1])
         raw = segs[k][1]
+        list_para = ('<w:numPr>' in raw or
+                     bool(re.search(r'<w:pStyle w:val="[^"]*(?:enum|list|itemize)',
+                                    raw)))
         if i_bab1 is not None and k >= i_bab1:
             # ----- isi BAB: indent 3em + 1.5 spasi -----
             if in_protected(k) or k in generated:
                 continue
-            if len(t) < 60 or '<w:numPr>' in raw or re.search(r'<w:pStyle w:val="[^"]*(enum|list)', raw):
+            if list_para:
+                # list (\itemize/\enumerate): 1.5 spasi + justify TANPA
+                # firstLine — indentasi hanging bullet/nomornya tetap utuh.
+                # jc="start" warisan LO ikut diganti justify (bila hanya
+                # ditambah-kan saat jc absen, Insideitemize tetap rata kiri).
+                segs[k][1] = upsert_ppr(raw, [LINE_15, JC_BOTH])
+                n_list += 1
+                continue
+            if len(t) < 60:
                 continue
             adds = [LINE_15, f'<w:ind w:firstLine="{PARINDENT}"/>']
             if not re.search(r'<w:jc\b', raw):
@@ -402,7 +435,11 @@ def run(SRC, DST, BASE, TOCBASE):
                 continue
             if in_protected(k) or k in generated:
                 continue
-            if len(t) < 60 or '<w:numPr>' in raw or re.search(r'<w:pStyle w:val="[^"]*(enum|list)', raw):
+            if list_para:
+                segs[k][1] = upsert_ppr(raw, [LINE_15, JC_BOTH])
+                n_list += 1
+                continue
+            if len(t) < 60:
                 continue
             if sec_prose:
                 if t == t.upper() and any(c.isalpha() for c in t):
@@ -426,6 +463,7 @@ def run(SRC, DST, BASE, TOCBASE):
     log.append(f'front matter prosa    : {n_prose} (indent 3em + 1.5 spasi, tanpa spacing)')
     log.append(f'front matter surat   : {n_letter} (spacing antar paragraf)')
     log.append(f'isi BAB ditata       : {n_body} (indent 3em + 1.5 spasi + justify)')
+    log.append(f'paragraf list ditata : {n_list} (1.5 spasi + justify, indent list utuh)')
 
     doc = ''.join(v for _, v in segs)
     data['word/document.xml'] = doc.encode('utf-8')
