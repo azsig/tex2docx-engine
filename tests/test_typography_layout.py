@@ -101,10 +101,10 @@ def test_vcur_label_tikz_tak_melompat_ke_sel_jauh():
     assert pkg.graft._find_line_target('filterkalman1d', texts, idxs, 40) == 45
 
 
-def test_vcur_jendela_default_60_paragraf():
-    idxs, texts = _fake_doc(105, {99: 'targetunik', 100: 'targetunik'})
-    assert pkg.graft._find_line_target('targetunik', texts, idxs, 40) == 99
-    texts[99] = 'para99'            # filler pulih — kini hanya idx 100 yang cocok
+def test_vcur_jendela_default_120_paragraf():
+    idxs, texts = _fake_doc(205, {159: 'targetunik', 160: 'targetunik'})
+    assert pkg.graft._find_line_target('targetunik', texts, idxs, 40) == 159
+    texts[159] = 'para159'          # filler pulih — kini hanya idx 160 yang cocok
     assert pkg.graft._find_line_target('targetunik', texts, idxs, 40) is None
 
 

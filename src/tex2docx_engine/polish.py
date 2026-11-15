@@ -82,14 +82,17 @@ def run(SRC, DST, FONT='Times New Roman'):
             return d
         cx, cy = int(m.group(1)), int(m.group(2))
         ncx, ncy, ratio = cx, cy, cy / cx
-        # Logo: dideteksi lewat NAMA gambar (docPr name, mis. 'logoUGM.png')
-        # ATAU bentuk persegi raksasa. Jalur nama penting: export LibreOffice
-        # tertentu menulis extent bawaan frame ODT (~14.6 cm) sehingga logo
-        # tak pernah menyentuh ambang 25 cm — halaman judul meluber ke hal. 2.
+        # Logo: HANYA lewat NAMA gambar (docPr name, mis. 'logoUGM.png').
+        # Dulu `or cx > 25cm` ikut menjadikan gambar isi resolusi tinggi
+        # "logo": 6 gambar skripsi uji (cx>25cm, rasio 0.5-2.0) menyusut ke
+        # 5.5cm padahal LaTeX memesan ~10-13.5cm — sisa halaman menganga.
+        # Gambar raksasa non-logo cukup di-clamp ke batas halaman (else).
+        # Ukuran persis dari LaTeX sendiri ditanam fix_odt dari marker
+        # t2dimg (width/height/scale hasil evaluasi engine) — jalur nama di
+        # sini tinggal fallback bila marker tak ada.
         nm = re.search(r'<wp:docPr[^>]*\bname="([^"]*)"', d)
         is_logo = bool(nm and 'logo' in nm.group(1).lower())
-        if (is_logo or cx > 25 * EMU_CM) and 0.5 < ratio < 2.0 \
-                and cx > 2 * LOGO_CM * EMU_CM:
+        if is_logo and 0.5 < ratio < 2.0 and cx > 2 * LOGO_CM * EMU_CM:
             ncx, ncy = int(LOGO_CM * EMU_CM), int(LOGO_CM * EMU_CM * ratio)
         else:
             if cx > MAX_W_CM * EMU_CM:

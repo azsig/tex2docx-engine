@@ -35,10 +35,16 @@ dicocokkan ke paragraf DOCX dan diberi page-break.
   Baris PERTAMA tiap halaman di-skip (jaraknya ke header/top, bukan antar-paragraf;
   paginasinya sudah ditangani page-break oracle). Jarak sangat besar (>= 40pt)
   dilewati: biasanya area gambar/tabel yang tak punya teks di bbox. Pencarian
-  paragraf penghasil baris PDF dibatasi jendela maju (60 paragraf) — teks label
+  paragraf penghasil baris PDF dibatasi jendela maju (120 paragraf) — teks label
   di dalam gambar TikZ tidak ada sebagai paragraf DOCX, dan tanpa jendela satu
   baris begitu bisa nyangkut di kecocokan jauh di depan (sel tabel) sehingga
   kursor melompat dan seluruh rentang halaman di antaranya kelewat oracle.
+  Kursor juga diikat ke awal halaman: posisi paragraf pertama tiap halaman
+  yang sudah ditemukan page-break oracle menjadi ikatan bawah, agar halaman
+  tanpa celah terukur (daftar berjarak seragam) tidak membekukan kursor di
+  dalamnya dan entri-entri daftar tertimpa w:before judul bab. Break halaman
+  yang mendarat tepat di bawah gambar naik ke paragraf gambarnya — pdftotext
+  tak membaca bitmap sehingga halaman berawalan gambar terbaca dari caption.
   Bonus dari koordinat-x: paragraf yang baris pertamanya mulai DI MARGIN
   (delta < 15pt) dipastikan tanpa w:firstLine — parindent nyata ~35pt —
   menggantikan detektor kata "kata kunci/keywords" yang lama.
@@ -53,14 +59,15 @@ import zipfile
 from collections import Counter
 
 
-def _find_line_target(ln, para_texts, idxs, vcur, window=60):
+def _find_line_target(ln, para_texts, idxs, vcur, window=120):
     """Paragraf DOCX penghasil baris PDF `ln` — dicari MAJU TERBATAS dari
     kursor `vcur`. Teks di dalam gambar (mis. label kotak diagram TikZ ->
     SVG) tidak ada sebagai paragraf DOCX di sekitar kursor; pencarian tanpa
     batas membuat baris begitu nyangkut di paragraf jauh di depan (mis. sel
     tabel ber-teks sama) — kursor melompat ratusan paragraf dan seluruh
-    rentang di antaranya kelewat oracle. 60 paragraf ~ beberapa halaman;
-    lebih dari itu dianggap tak ada pasangannya (skip — kursor diam).
+    rentang di antaranya kelewat oracle. 120 paragraf ~ beberapa halaman
+    (jaring pengaman halaman beruntun tanpa celah terukur); lebih dari itu
+    dianggap tak ada pasangannya (skip — kursor diam).
     Mengembalikan indeks J di idxs, atau None."""
     for j in range(vcur, min(vcur + window, len(idxs))):
         t = para_texts[idxs[j]]
@@ -171,9 +178,31 @@ def run(PDF, SRC, DST, TOC=""):
         t = para_raw[i]                       # fallback tanpa .toc: pendek + kapiral semua
         return len(para_texts[i]) < 40 and any(c.isalpha() for c in t) and t.upper() == t
 
+    def drawing_above(j, depth=2):
+        """Paragraf ber-<w:drawing> pada 1-2 paragraf non-kosong di ATAS j,
+        atau None. pdftotext tidak membaca bitmap: halaman PDF berawalan
+        gambar terbaca dari teks DI BAWAH gambar (caption/nomor) — break di
+        paragraf itu memisahkan gambar dari caption-nya (Gambar 4.4
+        tertinggal sendiri di halaman sebelumnya, caption 4.4 + gambar 4.5
+        molor satu halaman lagi)."""
+        q = j
+        for _ in range(depth):
+            q = prev_nonempty(q)
+            if q is None:
+                return None
+            if '<w:drawing>' in segs[idxs[q]][1]:
+                return q
+        return None
+
     def attach(target_j):
-        """Naikkan break melewati rangkaian judul section (maks 3 lompatan) tanpa break."""
+        """Naikkan break melewati rangkaian judul section (maks 3 lompatan)
+        tanpa break; break yang mendarat tepat di bawah gambar naik dulu ke
+        paragraf gambar — gambar dan caption/teks pengikutnya tetap satu
+        halaman."""
         j = target_j
+        d = drawing_above(j)
+        if d is not None and 'pageBreakBefore' not in segs[idxs[d]][1]:
+            j = d
         for _ in range(3):
             q = prev_nonempty(j)
             if (q is not None and section_label(idxs[q])
@@ -185,6 +214,7 @@ def run(PDF, SRC, DST, TOC=""):
 
     n_break = n_mid = n_miss = 0
     missed = []
+    floors = {}     # nomor halaman PDF -> posisi paragraf awalnya (anchor)
     cursor = 0
     for page, anchor, anchor2 in anchors:
         if len(anchor) < 8:
@@ -207,6 +237,7 @@ def run(PDF, SRC, DST, TOC=""):
             n_miss += 1
             missed.append(page)
             continue
+        floors[page] = target    # awal halaman P — ikatan bawah kursor vgap
         tn = para_texts[idxs[target]]
         if (anchor and tn.startswith(anchor)) or (use2 and tn.startswith(anchor2)):
             attach(target)                     # batas = awal paragraf → persis
@@ -539,7 +570,16 @@ def run(PDF, SRC, DST, TOC=""):
     n_vgap = n_vbig = n_native = 0
     vgap_log = []
     vcur = 0
-    for lines in bpages:
+    for pno, lines in enumerate(bpages):
+        # kursor tak boleh tertinggal di halaman sebelumnya: halaman tanpa
+        # satu pun celah >= 6pt (mis. DAFTAR ISI 63 entri berjarak seragam)
+        # membekukan vcur di dalamnya; halaman-halaman berikut lalu mencari
+        # target DI DALAM daftar itu dan menimpa entri daftar dengan
+        # w:before judul bab (regresi v0.4.5). Awal halaman P dari oracle
+        # page-break (bagian 3) menjadi ikatan bawah vcur.
+        fl = floors.get(pno + 1, 0)
+        if fl > vcur:
+            vcur = fl
         content = [L for L in lines if not is_chrome(L['t'])]
         if len(content) < 2:
             continue

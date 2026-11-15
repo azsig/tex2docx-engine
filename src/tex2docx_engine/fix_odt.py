@@ -10,6 +10,10 @@ fix_odt — dua lapis perbaikan content.xml ODT jalur make4ht (tex2docx-engine):
      <!--t2dalign:X-->   -> fo:text-align blok di dalam scope, sampai
      <!--t2dalign:end-->    penutup scope (\aftergroup group/env)
      <!--t2dbrk-->       -> fo:break-before="page" blok berikutnya
+     <!--t2dimg:...-->   -> svg:width/height <draw:frame> berikutnya ditulis
+                            ulang dari ukuran hasil evaluasi LaTeX (width/
+                            height/scale graphicx) — mode DVI tanpa .xbb
+                            membuat tex4ht menulis ukuran piksel mentah.
    Marker intra-paragraf (mis. \\[X] dan \\\\ di tengah paragraf) dibuang —
    jarak antar-baris dalam satu paragraf tak terrepresentasikan di Word (v1).
    \\\\ polos sendiri sudah menjadi <text:line-break/> via \\Configure{newline}.
@@ -21,6 +25,20 @@ fix_odt — dua lapis perbaikan content.xml ODT jalur make4ht (tex2docx-engine):
 
 2. BUNGKUS INLINE YATIM (perilaku lama tetap) — elemen inline langsung di
    bawah <office:text> dibungkus <text:p> agar LibreOffice tak membuangnya.
+
+3. REPAIR SKEMA ODF YANG MEMBUAT KONTEN LENYAP DI LIBREOFFICE:
+   - <table:table> di dalam <text:list-item> (render \\begin{equation}
+     make4ht) melanggar ODF 1.2 — LibreOffice membuangnya, persamaan
+     bernomor di dalam \\item hilang total. Isi sel-selnya dijahit jadi satu
+     text:p (frame rumus + tab + nomor).
+   - MathML <mrow></mrow><mo>SIMBOL</mo><mrow></mrow> (operator tunggal
+     $...$ tanpa operand) dikonversi LibreOffice jadi eqArr 3 placeholder
+     kosong bertumpuk, simbolnya hilang. mrow kosong dibuang; <mo> tunggal
+     jadi <mi>.
+   - ooffice.4ht menaruh fo:font-weight/fo:font-size Heading-1..4 di
+     <style:paragraph-properties> (melawan skema ODF; font wajib di
+     text-properties) -> LibreOffice mengabaikannya, Heading DOCX lahir
+     tanpa bold. Atribut font dipindah ke <style:text-properties>.
 
 Dokumen tanpa marker: satu-satunya perubahan adalah komentar dibuang (sama
 dengan parser lama yang juga membuang semua komentar) — ODT lama tetap
@@ -64,6 +82,175 @@ RE_T2D_BYTES = re.compile(rb'<!--\s*t2d[^>]*-->')
 RE_STRAY_CLOSE_P = re.compile(
     r'(</text:(?:index-body|bibliography|list)>)\s*</text:p>')
 ROOT_CLOSE = '</office:document-content>'
+
+# marker ukuran gambar dari t2dcfg (hook key Gin + pembungkus
+# \Ginclude@graphics) — tepat sebelum <draw:frame> yang dirender tex4ht.
+RE_T2DIMG = re.compile(
+    r'<!--t2dimg:hasw=([01]),w=([\d.]+)pt,hash=([01]),h=([\d.]+)pt,'
+    r'scale=([\d.]+)-->\s*(<draw:frame\b[^>]*>)')
+RE_EMPTY_MROW = re.compile(r'<mrow\s*/>|<mrow>\s*</mrow>')
+RE_LONE_MO = re.compile(
+    r'(<math\b[^>]*>)\s*(?:<mrow\s*/>|<mrow>\s*</mrow>)*'
+    r'<mo(?:\s[^>]*)?>([^<]+)</mo>'
+    r'\s*(?:<mrow\s*/>|<mrow>\s*</mrow>)*\s*(</math>)')
+# Atribut font yang menurut skema ODF wajib di text-properties, bukan
+# paragraph-properties (pelanggarannya bawaan ooffice.4ht pada Heading-1..4).
+FONT_LOCALS = {'font-size', 'font-weight', 'font-style', 'font-family',
+               'font-size-asian', 'font-size-complex', 'font-weight-asian',
+               'font-weight-complex', 'font-style-asian', 'font-style-complex',
+               'font-family-asian', 'font-family-complex'}
+
+
+def _apply_latex_image_sizes(xml):
+    """Tulis ulang svg:width/height <draw:frame> dari ukuran hasil evaluasi
+    LaTeX (marker <!--t2dimg:...--> tepat sebelum frame).
+
+    Mode DVI tanpa .xbb membuat \\if:boundingbox false: tex4ht menulis
+    ukuran PIKSEL mentah gambar sebagai pt (logo yang diperintahkan 5.5cm
+    jadi 414pt = 14.6cm; width=0.7\\linewidth jadi 1600pt = 56cm) — polish
+    tidak punya cara membedakan logo dari gambar isi resolusi tinggi, dan
+    tebakan apa pun melawan ukuran yang sudah memesan user di LaTeX. Marker
+    membawa width/height/scale APA ADANYA hasil evaluasi engine (\\textwidth
+    di dalam subfigure/minipage otomatis nilai lokalnya); rasio diambil dari
+    frame (rasio piksel asli gambar). Return (xml, jumlah frame diubah)."""
+    def repl(m):
+        has_w, req_w = m.group(1) == '1', float(m.group(2))
+        has_h, req_h = m.group(3) == '1', float(m.group(4))
+        scale = float(m.group(5))
+        frame = m.group(6)
+        mw = re.search(r'svg:width="([\d.]+)pt"', frame)
+        mh = re.search(r'svg:height="([\d.]+)pt"', frame)
+        if not (mw and mh):
+            return frame
+        ow, oh = float(mw.group(1)), float(mh.group(1))
+        if ow <= 0 or oh <= 0:
+            return frame
+        ratio = oh / ow
+        if has_w and has_h:
+            nw, nh = req_w, req_h
+        elif has_w:
+            nw, nh = req_w, req_w * ratio
+        elif has_h:
+            nw, nh = req_h / ratio, req_h
+        elif scale != 1.0:
+            # 1 px t4ht = 1pt @72dpi; 0.75 = rasio ke 96dpi kali skala user
+            nw, nh = ow * 0.75 * scale, oh * 0.75 * scale
+        else:
+            return frame
+        frame = re.sub(r'svg:width="[^"]*"', f'svg:width="{nw:.2f}pt"', frame)
+        frame = re.sub(r'svg:height="[^"]*"', f'svg:height="{nh:.2f}pt"', frame)
+        return frame
+    out = RE_T2DIMG.sub(repl, xml)
+    return out, len(RE_T2DIMG.findall(xml))
+
+
+def _clean_mathml(xml):
+    """MathML pola <mrow></mrow><mo>SIMBOL</mo><mrow></mrow> — operator
+    tunggal $...$ tanpa operand ($\\times$, $\\odot$, $\\bullet$, $\\dots$) —
+    dikonversi LibreOffice Math jadi <m:eqArr> berisi 3 placeholder kosong
+    BERTUMPUK dan simbolnya HILANG (8 titik di skripsi uji). mrow kosong
+    dibuang; bila isi <math> tinggal satu <mo>, jadi <mi> — dirender sebagai
+    simbol tunggal yang benar. Return (xml, n_mrow, n_mo)."""
+    n_mrow = len(RE_EMPTY_MROW.findall(xml))
+    xml = RE_EMPTY_MROW.sub('', xml)
+    xml, n_mo = RE_LONE_MO.subn(r'\1<mi>\2</mi>\3', xml)
+    return xml, n_mrow, n_mo
+
+
+def _flatten_equation_tables(root):
+    """<table:table> di dalam <text:list-item> — melawan skema ODF 1.2
+    (list-item hanya boleh p/h/list) dan LibreOffice MEMBUANGNYA saat impor:
+    persamaan bernomor \\begin{equation} di dalam \\item lenyap total
+    (16 persamaan Bab 3-4 skripsi uji). make4ht merender equation sebagai
+    tabel [rumus | nomor]; isi sel-selnya dijahit jadi SATU text:p pada
+    posisi tabel: frame rumus + <text:tab/> + teks nomor — utuh diekspor
+    tanpa memutus penomoran enumerate. Return jumlah tabel diratakan."""
+    TABLE = f'{{{TABLE_NS}}}table'
+    CELL = f'{{{TABLE_NS}}}table-cell'
+    ITEM = f'{{{TEXT_NS}}}list-item'
+    parent = {c: p for p in root.iter() for c in p}
+    n = 0
+    for tbl in list(root.iter(TABLE)):
+        holder = parent.get(tbl)
+        if holder is None or holder.tag != ITEM:
+            continue
+        p = ET.Element(TEXT_P)
+        anchor = [None]
+
+        def emit_text(s):
+            if not s:
+                return
+            if anchor[0] is None:
+                p.text = (p.text or '') + s
+            else:
+                anchor[0].tail = (anchor[0].tail or '') + s
+
+        def emit_el(el):
+            p.append(el)
+            anchor[0] = el
+
+        def drain(el):
+            """teks + anak (tail anak disalin lalu dinolkan)"""
+            emit_text(el.text)
+            for ch in list(el):
+                emit_el(ch)
+                emit_text(ch.tail)
+                ch.tail = None
+
+        for ci, cell in enumerate(tbl.iter(CELL)):
+            if ci:
+                emit_el(ET.Element(f'{{{TEXT_NS}}}tab'))
+            ps = [q for q in cell if q.tag == TEXT_P]
+            if ps:
+                for q in ps:
+                    drain(q)
+            else:
+                drain(cell)
+        idx = list(holder).index(tbl)
+        holder.remove(tbl)
+        holder.insert(idx, p)
+        n += 1
+    return n
+
+
+def _fix_heading_fonts(styles_bytes):
+    """ooffice.4ht menaruh fo:font-weight/fo:font-size Heading-1..4 di
+    <style:paragraph-properties> — melawan skema ODF (atribut font wajib di
+    <style:text-properties>) sehingga LibreOffice mengabaikannya saat
+    ekspor DOCX: Heading1..4 lahir dengan <w:rPr> kosong, tak bold dan
+    berukuran warisan base (judul BAB tetap bold hanya karena weight
+    oracle graft menyentuh paragraf rata tengah; sub-bab/sub-subbab rata
+    kiri tak pernah dibold). Atribut font dipindah ke text-properties.
+    Return (styles_baru_bytes, jumlah atribut) atau (None, 0)."""
+    try:
+        root = ET.fromstring(styles_bytes)
+    except ET.ParseError:
+        return None, 0
+    moved = 0
+    for st in root.iter(f'{{{STYLE_NS}}}style'):
+        name = st.get(f'{{{STYLE_NS}}}name')
+        if not (name and re.fullmatch(r'Heading-[1-4]', name)):
+            continue
+        pp = st.find(f'{{{STYLE_NS}}}paragraph-properties')
+        if pp is None:
+            continue
+        grab = {}
+        for k in list(pp.attrib):
+            if k.rsplit('}', 1)[-1] in FONT_LOCALS:
+                grab[k] = pp.attrib.pop(k)
+        if not grab:
+            continue
+        tp = st.find(f'{{{STYLE_NS}}}text-properties')
+        if tp is None:
+            tp = ET.SubElement(st, f'{{{STYLE_NS}}}text-properties')
+        tp.attrib.update(grab)          # urutan skema: p-pr sebelum t-pr
+        moved += len(grab)
+    if not moved:
+        return None, 0
+    for _, (prefix, uri) in ET.iterparse(io.BytesIO(styles_bytes),
+                                         events=['start-ns']):
+        ET.register_namespace(prefix, uri)
+    return ET.tostring(root, encoding='unicode').encode('utf-8'), moved
 
 
 def _repair_content(data):
@@ -266,6 +453,10 @@ def planted_heading_aligns(styles_xml):
 def run(SRC, DST):
     zin = zipfile.ZipFile(SRC)
     content = _repair_content(zin.read('content.xml').decode('utf-8'))
+    # ukuran gambar dari LaTeX: di STRING pra-parse (marker komentar harus
+    # utuh; hasilnya komentar dibiarkan — strip defensif di akhir run()
+    # membuangnya bersama marker lain).
+    content, n_imgsize = _apply_latex_image_sizes(content)
 
     # Prefiks wajib dipristinakan SEBELUM serialisasi: content.xml buatan
     # make4ht tidak selalu mendeklarasikan fo: — tanpa ini ET menulis
@@ -291,6 +482,13 @@ def run(SRC, DST):
     if n_flat:
         print(f'[fix_odt] ratakan p-dalam-p: {n_flat} (ODF melarang, '
               f'LibreOffice membuang paragraf dalam)')
+
+    # ---- pass 0b: ratakan table:table di dalam list-item (persamaan
+    # bernomor \begin{equation} dalam \item — LibreOffice membuangnya) ----
+    n_eqtbl = _flatten_equation_tables(root)
+    if n_eqtbl:
+        print(f'[fix_odt] persamaan dalam item diratakan: {n_eqtbl} tabel '
+              f'(ODF melarang table di list-item, LibreOffice membuangnya)')
 
     stats = dict(margin=0, align=0, brk=0, drop_inline=0, drop_vs=0,
                  hardened=0, comments=0)
@@ -554,6 +752,9 @@ def run(SRC, DST):
                 reg.apply(h, {'text-align': aligns[st]})
                 stats['hardened'] += 1
 
+    # ---- pass D: font Heading-1..4 pindah paragraph- -> text-properties ----
+    styles_fixed, n_font = _fix_heading_fonts(zin.read('styles.xml'))
+
     # ---- lapis lama: bungkus inline yatim ----
     # Sekarang juga DI DALAM text:section: env center/quote jalur tex4ht
     # menjadi section berisi <text:p begin-env-p/> + SPAN YATIM + <text:p
@@ -601,6 +802,18 @@ def run(SRC, DST):
     zin.close()
     out = ET.tostring(root, encoding='unicode').encode('utf-8')
     data['content.xml'] = RE_T2D_BYTES.sub(b'', out)  # strip defensif sisa
+    if styles_fixed:
+        data['styles.xml'] = styles_fixed
+    # MathML formula ter-embed (*-m*/content.xml dsb.): mrow kosong + <mo>
+    # tunggal dibersihkan sebelum LibreOffice menerjemahkannya jadi eqArr.
+    n_mrow = n_lone_mo = 0
+    for name in list(data):
+        if name.endswith('content.xml'):
+            mxml, a, b = _clean_mathml(data[name].decode('utf-8'))
+            if a or b:
+                data[name] = mxml.encode('utf-8')
+                n_mrow += a
+                n_lone_mo += b
     with zipfile.ZipFile(DST, 'w', zipfile.ZIP_DEFLATED) as z:
         for n, b in data.items():
             z.writestr(n, b)
@@ -609,6 +822,10 @@ def run(SRC, DST):
           f'(drop: inline={stats["drop_inline"]} vs={stats["drop_vs"]}, '
           f'komentar={stats["comments"]}); {n_wrapped} inline yatim dibungkus '
           f'(jenis: {sorted(kinds)})')
+    if n_imgsize or n_eqtbl or n_font or n_mrow or n_lone_mo:
+        print(f'[fix_odt] repair: gambar ukuran LaTeX={n_imgsize}, '
+              f'persamaan-list={n_eqtbl}, font heading={n_font}, '
+              f'mrow kosong={n_mrow}, mo tunggal={n_lone_mo}')
 
 
 def _is_marker_only(par):

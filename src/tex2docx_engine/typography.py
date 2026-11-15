@@ -405,13 +405,24 @@ def run(SRC, DST, BASE, TOCBASE):
     for k in pidx():
         t = ptext(segs[k][1])
         raw = segs[k][1]
-        list_para = ('<w:numPr>' in raw or
-                     bool(re.search(r'<w:pStyle w:val="[^"]*(?:enum|list|itemize)',
-                                    raw)))
+        # Judul section (Heading*/outlineLvl) DULU dikecualikan dari perlakuan
+        # list: make4ht memetakan judul ke paragraf bernomor (numPr — artefak
+        # struktur, sama yang dibuang set_center graft), jadi tanpa ini
+        # Heading2/3 (sub-bab/sub-subbab) ikut list_para dan tertimpa
+        # LINE_15 + JC_BOTH (v0.4.5: judul bab berubah jadi 1.5 justify).
+        heading_para = bool(re.search(r'<w:pStyle w:val="[^"]*[Hh]eading', raw)
+                            or '<w:outlineLvl' in raw)
+        list_para = (not heading_para and
+                     ('<w:numPr>' in raw or
+                      bool(re.search(r'<w:pStyle w:val="[^"]*(?:enum|list|itemize)',
+                                     raw))))
         if i_bab1 is not None and k >= i_bab1:
             # ----- isi BAB: indent 3em + 1.5 spasi -----
             if in_protected(k) or k in generated:
                 continue
+            if heading_para:
+                continue      # judul: numPr bukan list; jangan pula jatuh ke
+                              # perlakuan badan (firstLine/justify judul >60 kr)
             if list_para:
                 # list (\itemize/\enumerate): 1.5 spasi + justify TANPA
                 # firstLine — indentasi hanging bullet/nomornya tetap utuh.
@@ -434,6 +445,8 @@ def run(SRC, DST, BASE, TOCBASE):
                 sec_prose = bool(PROSE_RE.search(t))
                 continue
             if in_protected(k) or k in generated:
+                continue
+            if heading_para:
                 continue
             if list_para:
                 segs[k][1] = upsert_ppr(raw, [LINE_15, JC_BOTH])
