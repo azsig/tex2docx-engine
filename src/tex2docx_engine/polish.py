@@ -107,6 +107,97 @@ def run(SRC, DST, FONT='Times New Roman'):
     doc = re.sub(r'<w:drawing>.*?</w:drawing>', lambda m: fix_extents(m.group(0)), doc, flags=re.S)
     log.append(f'gambar diproses         : {n_img} drawing (clamp {MAX_W_CM}cm, logo {LOGO_CM}cm)')
 
+    # ---------- 4. normalisasi persamaan -> tabel 3 kolom ----------
+    # Tabel persamaan ooffice.4ht hanya 2 kolom TANPA lebar grid — LibreOffice
+    # membagi 50/50 (4534|4536) dan rumus terdorong ke paruh kiri. Persamaan
+    # di dalam \item (list-item ODF melarang table — diratakan fix_odt jadi
+    # text:p ber-<m:oMath> + tab + nomor) kini bisa dirangkum kembali jadi
+    # tabel tanpa menyentuh penomoran w:numId OOXML. Semua jadi SATU bentuk:
+    # [kosong 12% | rumus center 76% | nomor kanan 12%], tanpa border,
+    # vAlign center — kolom kiri kosong penyeimbang agar rumus tepat di
+    # tengah halaman seperti \begin{equation} LaTeX.
+    W_SIDE, W_MID = 1088, 6894
+
+    def _build_3col_eq_table(formula_inner, num_inner):
+        return (
+            '<w:tbl>'
+            '<w:tblPr>'
+            '<w:tblW w:w="5000" w:type="pct"/>'
+            '<w:jc w:val="center"/>'
+            '<w:tblLayout w:type="fixed"/>'
+            '<w:tblCellMar>'
+            '<w:top w:w="0" w:type="dxa"/><w:start w:w="0" w:type="dxa"/>'
+            '<w:bottom w:w="0" w:type="dxa"/><w:end w:w="0" w:type="dxa"/>'
+            '</w:tblCellMar>'
+            '</w:tblPr>'
+            f'<w:tblGrid><w:gridCol w:w="{W_SIDE}"/>'
+            f'<w:gridCol w:w="{W_MID}"/><w:gridCol w:w="{W_SIDE}"/></w:tblGrid>'
+            '<w:tr>'
+            f'<w:tc><w:tcPr><w:tcW w:w="{W_SIDE}" w:type="dxa"/>'
+            '<w:tcBorders/><w:vAlign w:val="center"/></w:tcPr>'
+            '<w:p><w:pPr><w:spacing w:before="60" w:after="60"/></w:pPr></w:p></w:tc>'
+            f'<w:tc><w:tcPr><w:tcW w:w="{W_MID}" w:type="dxa"/>'
+            '<w:tcBorders/><w:vAlign w:val="center"/></w:tcPr>'
+            '<w:p><w:pPr><w:pStyle w:val="Equp"/>'
+            '<w:spacing w:before="60" w:after="60"/><w:jc w:val="center"/></w:pPr>'
+            f'{formula_inner}</w:p></w:tc>'
+            f'<w:tc><w:tcPr><w:tcW w:w="{W_SIDE}" w:type="dxa"/>'
+            '<w:tcBorders/><w:vAlign w:val="center"/></w:tcPr>'
+            '<w:p><w:pPr><w:pStyle w:val="Equnump"/>'
+            '<w:spacing w:before="60" w:after="60"/><w:jc w:val="end"/></w:pPr>'
+            f'{num_inner}</w:p></w:tc>'
+            '</w:tr>'
+            '</w:tbl>'
+        )
+
+    n_eqtbl_up = [0]
+
+    def _upgrade_2col_eq_tbl(m):
+        tbl = m.group(0)
+        if 'w:val="Equp"' not in tbl and 'w:val="Equnump"' not in tbl:
+            return tbl
+        tcs = re.findall(r'<w:tc\b[^>]*>.*?</w:tc>', tbl, flags=re.S)
+        if len(tcs) != 2:
+            return tbl
+        p0 = re.search(r'<w:p\b[^>]*>(?:<w:pPr>.*?</w:pPr>)?(.*?)</w:p>',
+                       tcs[0], flags=re.S)
+        p1 = re.search(r'<w:p\b[^>]*>(?:<w:pPr>.*?</w:pPr>)?(.*?)</w:p>',
+                       tcs[1], flags=re.S)
+        if not (p0 and p1):
+            return tbl
+        n_eqtbl_up[0] += 1
+        return _build_3col_eq_table(p0.group(1), p1.group(1))
+
+    doc = re.sub(r'<w:tbl\b[^>]*>.*?</w:tbl>', _upgrade_2col_eq_tbl, doc, flags=re.S)
+
+    # ekor paragraf persamaan ratakan list-item: ... <w:tab/> run + nomor run
+    # + </w:p> — nomor persamaan (x.y) selalu run terakhir.
+    RE_EQNUM_TAIL = re.compile(
+        r'(<w:r\b[^>]*>(?:(?!</w:r>).)*?<w:tab\s*/>(?:(?!</w:r>).)*?</w:r>)\s*'
+        r'(<w:r\b[^>]*>(?:(?!</w:r>).)*?<w:t[^>]*>\((\d+(?:\.\d+)*)\)</w:t>'
+        r'\s*</w:r>)\s*</w:p>$', re.S)
+
+    n_eqwrap = [0]
+
+    def _wrap_flat_eq_para(m):
+        p = m.group(0)
+        if '<m:oMath' not in p:
+            return p
+        sp = RE_EQNUM_TAIL.search(p)
+        if not sp:
+            return p
+        head = p[:sp.start()]
+        head = re.sub(r'^<w:p\b[^>]*>(?:<w:pPr>.*?</w:pPr>)?', '', head,
+                      count=1, flags=re.S)
+        num_run = re.sub(r'<w:tab\s*/>', '', sp.group(2))
+        n_eqwrap[0] += 1
+        return _build_3col_eq_table(head, num_run)
+
+    doc = re.sub(r'<w:p\b[^>]*>.*?</w:p>', _wrap_flat_eq_para, doc, flags=re.S)
+    if n_eqtbl_up[0] or n_eqwrap[0]:
+        log.append(f'persamaan dinormalisasi  : {n_eqtbl_up[0]} tabel 2->3 '
+                   f'kolom, {n_eqwrap[0]} paragraf dirangkum tabel')
+
     data['word/document.xml'] = doc.encode('utf-8')
     data['word/styles.xml'] = styles.encode('utf-8')
     with zipfile.ZipFile(DST, 'w', zipfile.ZIP_DEFLATED) as z:

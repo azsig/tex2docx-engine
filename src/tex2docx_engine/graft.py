@@ -80,6 +80,30 @@ def _find_line_target(ln, para_texts, idxs, vcur, window=120):
     return None
 
 
+def _drawing_above(j, segs, idxs, para_texts, max_back=3):
+    """Paragraf gambar (<w:drawing>) TEPAT di atas `j`, atau None.
+
+    pdftotext tidak membaca bitmap: halaman PDF berawalan gambar terbaca
+    dari teks DI BAWAH gambar (caption) — break di caption memisahkan
+    gambar dari caption-nya. DUA jebakan yang membuat versi lama salah:
+    - prev_nonempty MELOMPATI paragraf gambar murni (teksnya kosong) —
+      caption tak pernah "bertemu" gambar di bawahnya;
+    - mundur 2 paragraf non-kosong dari halaman berikutnya bisa mendarat
+      di LOGO HALAMAN JUDUL (paragraf teks byline di antaranya tak
+      dianggap tembok) — break PERNYATAAN malah naik ke cover dan halaman
+      judul terpotong setelah "SKRIPSI".
+    Maka: mundur maksimal `max_back` paragraf APA PUN; berhenti di
+    paragraf teks biasa (bukan caption), dan paragraf gambar hanya sah
+    bila teksnya pendek (gambar murni / label subfigure)."""
+    for q in range(j - 1, max(-1, j - max_back - 1), -1):
+        raw = segs[idxs[q]][1]
+        if '<w:drawing>' in raw:
+            return q if len(para_texts[idxs[q]]) < 40 else None
+        if para_texts[idxs[q]]:
+            return None
+    return None
+
+
 def run(PDF, SRC, DST, TOC=""):
 
     def norm(s):
@@ -178,29 +202,13 @@ def run(PDF, SRC, DST, TOC=""):
         t = para_raw[i]                       # fallback tanpa .toc: pendek + kapiral semua
         return len(para_texts[i]) < 40 and any(c.isalpha() for c in t) and t.upper() == t
 
-    def drawing_above(j, depth=2):
-        """Paragraf ber-<w:drawing> pada 1-2 paragraf non-kosong di ATAS j,
-        atau None. pdftotext tidak membaca bitmap: halaman PDF berawalan
-        gambar terbaca dari teks DI BAWAH gambar (caption/nomor) — break di
-        paragraf itu memisahkan gambar dari caption-nya (Gambar 4.4
-        tertinggal sendiri di halaman sebelumnya, caption 4.4 + gambar 4.5
-        molor satu halaman lagi)."""
-        q = j
-        for _ in range(depth):
-            q = prev_nonempty(q)
-            if q is None:
-                return None
-            if '<w:drawing>' in segs[idxs[q]][1]:
-                return q
-        return None
-
     def attach(target_j):
         """Naikkan break melewati rangkaian judul section (maks 3 lompatan)
         tanpa break; break yang mendarat tepat di bawah gambar naik dulu ke
         paragraf gambar — gambar dan caption/teks pengikutnya tetap satu
         halaman."""
         j = target_j
-        d = drawing_above(j)
+        d = _drawing_above(j, segs, idxs, para_texts)
         if d is not None and 'pageBreakBefore' not in segs[idxs[d]][1]:
             j = d
         for _ in range(3):

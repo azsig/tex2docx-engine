@@ -423,6 +423,9 @@ def run(SRC, DST, BASE, TOCBASE):
             if heading_para:
                 continue      # judul: numPr bukan list; jangan pula jatuh ke
                               # perlakuan badan (firstLine/justify judul >60 kr)
+            if '<m:oMath' in raw:
+                continue      # persamaan OMML: firstLine/justify menggeser
+                              # rumus; teks m:oMath ikut membuat len(t) >= 60
             if list_para:
                 # list (\itemize/\enumerate): 1.5 spasi + justify TANPA
                 # firstLine — indentasi hanging bullet/nomornya tetap utuh.
@@ -447,6 +450,8 @@ def run(SRC, DST, BASE, TOCBASE):
             if in_protected(k) or k in generated:
                 continue
             if heading_para:
+                continue
+            if '<m:oMath' in raw:
                 continue
             if list_para:
                 segs[k][1] = upsert_ppr(raw, [LINE_15, JC_BOTH])

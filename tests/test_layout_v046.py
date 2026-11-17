@@ -65,9 +65,10 @@ def test_persamaan_table_dalam_list_item_diratakan(tmp_path):
     assert '<draw:frame' in out               # frame rumus selamat
     assert '(3.45)' in out                    # nomor persamaan selamat
     assert '<text:tab' in out                 # pemisah rumus | nomor
-    # hasilnya paragraf, bukan lagi table
+    assert 'text:style-name="equ-p"' in out   # penanda utk polish (3-kolom)
+    # hasilnya paragraf (pembawa penanda equ-p), bukan lagi table
     assert re.search(r'<text:list-item>\s*<text:p>Item enumerate</text:p>\s*'
-                     r'<text:p>', out)
+                     r'<text:p[^>]*>', out)
 
 
 # ---------- 2a. polish: logo hanya lewat nama ----------
@@ -189,21 +190,24 @@ def test_heading_font_attrs_pindah_ke_text_properties():
               f'xmlns:fo="{FO_NS}">'
               '<style:style style:name="Heading-2" style:family="paragraph">'
               '<style:paragraph-properties fo:font-weight="bold" '
-              'fo:font-size="12pt" fo:margin-bottom="25pt"/>'
+              'fo:font-size="14.3999996185303pt" fo:margin-bottom="25pt"/>'
               '</style:style>'
               '<style:style style:name="Standard" style:family="paragraph">'
               '<style:paragraph-properties fo:font-weight="bold"/>'
               '</style:style>'
               '</office:document-styles>').encode('utf-8')
     out, n = pkg.fix_odt._fix_heading_fonts(styles)
-    assert n == 2                                    # hanya Heading-2
+    assert n > 0                                     # hanya Heading-2
     root = __import__('xml.etree.ElementTree', fromlist=['Element']).fromstring(out)
     st = next(s for s in root.iter(f'{{{STYLE_NS}}}style')
               if s.get(f'{{{STYLE_NS}}}name') == 'Heading-2')
     pp = st.find(f'{{{STYLE_NS}}}paragraph-properties')
     tp = st.find(f'{{{STYLE_NS}}}text-properties')
     assert tp.get(f'{{{FO_NS}}}font-weight') == 'bold'
+    # junk hardcode 14.4pt DIBUANG (v0.4.6 mengaktifkannya -> 17.5pt bab);
+    # Heading-2 diisi 12pt (\normalsize sub-bab)
     assert tp.get(f'{{{FO_NS}}}font-size') == '12pt'
+    assert tp.get(f'{{{STYLE_NS}}}font-size-complex') == '12pt'
     assert f'{{{FO_NS}}}margin-bottom' in pp.attrib
     assert all(k.rsplit('}', 1)[-1] not in ('font-weight', 'font-size')
                for k in pp.attrib)
@@ -211,6 +215,58 @@ def test_heading_font_attrs_pindah_ke_text_properties():
     std = next(s for s in root.iter(f'{{{STYLE_NS}}}style')
                if s.get(f'{{{STYLE_NS}}}name') == 'Standard')
     assert std.find(f'{{{STYLE_NS}}}text-properties') is None
+
+
+def test_heading1_junk_17pt_dibuang_bukan_diaktifkan():
+    r"""fo:font-size 17.3pt ooffice.4ht di Heading-1 wajib dibuang (bab =
+    \large = 14pt dari parent), bukan dipindah — v0.4.6 memindahkan dan
+    judul bab membengkak jadi 17.5pt."""
+    styles = (f'<?xml version="1.0"?><office:document-styles '
+              f'xmlns:office="{ODT_NS["office"]}" xmlns:style="{STYLE_NS}" '
+              f'xmlns:fo="{FO_NS}">'
+              '<style:style style:name="Heading-1" style:family="paragraph">'
+              '<style:paragraph-properties fo:font-weight="bold" '
+              'fo:font-size="17.2999992370605pt"/>'
+              '</style:style></office:document-styles>').encode('utf-8')
+    out, n = pkg.fix_odt._fix_heading_fonts(styles)
+    assert n > 0
+    root = __import__('xml.etree.ElementTree', fromlist=['Element']).fromstring(out)
+    st = next(s for s in root.iter(f'{{{STYLE_NS}}}style')
+              if s.get(f'{{{STYLE_NS}}}name') == 'Heading-1')
+    tp = st.find(f'{{{STYLE_NS}}}text-properties')
+    assert tp.get(f'{{{FO_NS}}}font-weight') == 'bold'
+    assert tp.get(f'{{{FO_NS}}}font-size') is None   # warisi parent (14pt)
+
+
+def test_heading_hasil_probe_nfss_tak_disentuh():
+    r"""Style terbitan probe NFSS (text-properties benar, p-pr hanya
+    text-align) tidak di-force bold/12pt — 100% mengikuti .cls."""
+    styles = (f'<?xml version="1.0"?><office:document-styles '
+              f'xmlns:office="{ODT_NS["office"]}" xmlns:style="{STYLE_NS}" '
+              f'xmlns:fo="{FO_NS}">'
+              '<style:style style:name="Heading-3" style:family="paragraph">'
+              '<style:paragraph-properties fo:text-align="left"/>'
+              '<style:text-properties fo:font-size="13pt" '
+              'fo:font-style="italic" fo:font-weight="normal"/>'
+              '</style:style>'
+              '<style:style style:name="Heading-2" style:family="paragraph">'
+              '<style:paragraph-properties fo:font-weight="bold" '
+              'fo:font-size="14.4pt"/>'
+              '</style:style>'
+              '</office:document-styles>').encode('utf-8')
+    out, n = pkg.fix_odt._fix_heading_fonts(styles)
+    root = __import__('xml.etree.ElementTree', fromlist=['Element']).fromstring(out)
+    st3 = next(s for s in root.iter(f'{{{STYLE_NS}}}style')
+               if s.get(f'{{{STYLE_NS}}}name') == 'Heading-3')
+    tp3 = st3.find(f'{{{STYLE_NS}}}text-properties')
+    assert tp3.get(f'{{{FO_NS}}}font-size') == '13pt'      # utuh, bukan 12pt
+    assert tp3.get(f'{{{FO_NS}}}font-weight') == 'normal'  # utuh, bukan bold
+    assert st3.find(f'{{{STYLE_NS}}}paragraph-properties').get(
+        f'{{{FO_NS}}}text-align') == 'left'
+    st2 = next(s for s in root.iter(f'{{{STYLE_NS}}}style')
+               if s.get(f'{{{STYLE_NS}}}name') == 'Heading-2')
+    assert st2.find(f'{{{STYLE_NS}}}text-properties').get(
+        f'{{{FO_NS}}}font-size') == '12pt'                 # fallback aktif
 
 
 # ---------- 5. Heading tak ikut list_para di typography ----------

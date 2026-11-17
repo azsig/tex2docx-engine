@@ -174,7 +174,10 @@ def _flatten_equation_tables(root):
         holder = parent.get(tbl)
         if holder is None or holder.tag != ITEM:
             continue
-        p = ET.Element(TEXT_P)
+        # style-name 'equ-p' = penanda paragraf persamaan hasil ratakan
+        # (di OOXML tak ada list-item; polish membungkusnya kembali jadi
+        # tabel 3 kolom tanpa menyentuh penomoran enumerate).
+        p = ET.Element(TEXT_P, {f'{{{TEXT_NS}}}style-name': 'equ-p'})
         anchor = [None]
 
         def emit_text(s):
@@ -217,16 +220,23 @@ def _fix_heading_fonts(styles_bytes):
     """ooffice.4ht menaruh fo:font-weight/fo:font-size Heading-1..4 di
     <style:paragraph-properties> — melawan skema ODF (atribut font wajib di
     <style:text-properties>) sehingga LibreOffice mengabaikannya saat
-    ekspor DOCX: Heading1..4 lahir dengan <w:rPr> kosong, tak bold dan
-    berukuran warisan base (judul BAB tetap bold hanya karena weight
-    oracle graft menyentuh paragraf rata tengah; sub-bab/sub-subbab rata
-    kiri tak pernah dibold). Atribut font dipindah ke text-properties.
+    ekspor DOCX: Heading1..4 lahir dengan <w:rPr> kosong (tak bold).
+
+    Perilaku (fallback bila probe NFSS t2dcfg tak menerbitkan style —
+    style hasil probe sudah punya text-properties benar dan tidak disentuh):
+    - fo:font-size bawaan ooffice.4ht Heading-1/2 (17.3pt / 14.4pt,
+      hardcode melawan ukuran kelas) DIBUANG, bukan dipindah — mengaktifkan
+      mereka (v0.4.6) membuat judul bab membengkak jadi 17.5pt. Heading-1
+      mewarisi parent 'Heading' (14pt = \\large bab).
+    - Semua Heading-1..4 dipastikan bold (Heading-2 ooffice hanya punya
+      weight-complex); Heading-2..4 tanpa ukuran diisi 12pt
+      (\\normalsize sub-bab/sub-subbab).
     Return (styles_baru_bytes, jumlah atribut) atau (None, 0)."""
     try:
         root = ET.fromstring(styles_bytes)
     except ET.ParseError:
         return None, 0
-    moved = 0
+    touched = 0
     for st in root.iter(f'{{{STYLE_NS}}}style'):
         name = st.get(f'{{{STYLE_NS}}}name')
         if not (name and re.fullmatch(r'Heading-[1-4]', name)):
@@ -236,21 +246,37 @@ def _fix_heading_fonts(styles_bytes):
             continue
         grab = {}
         for k in list(pp.attrib):
-            if k.rsplit('}', 1)[-1] in FONT_LOCALS:
-                grab[k] = pp.attrib.pop(k)
-        if not grab:
-            continue
+            local = k.rsplit('}', 1)[-1]
+            if local in FONT_LOCALS:
+                val = pp.attrib.pop(k)
+                if local.startswith('font-size') and \
+                        name in ('Heading-1', 'Heading-2'):
+                    continue     # junk ukuran hardcode ooffice — jangan aktifkan
+                grab[k] = val
         tp = st.find(f'{{{STYLE_NS}}}text-properties')
         if tp is None:
             tp = ET.SubElement(st, f'{{{STYLE_NS}}}text-properties')
+        if not any(k.rsplit('}', 1)[-1].startswith('font-weight')
+                   for k in tp.attrib):
+            grab[f'{{{FO_NS}}}font-weight'] = 'bold'
+            grab[f'{{{STYLE_NS}}}font-weight-asian'] = 'bold'
+            grab[f'{{{STYLE_NS}}}font-weight-complex'] = 'bold'
+        if name in ('Heading-2', 'Heading-3', 'Heading-4') and \
+                not any(k.rsplit('}', 1)[-1].startswith('font-size')
+                        for k in tp.attrib):
+            grab[f'{{{FO_NS}}}font-size'] = '12pt'
+            grab[f'{{{STYLE_NS}}}font-size-asian'] = '12pt'
+            grab[f'{{{STYLE_NS}}}font-size-complex'] = '12pt'
+        if not grab:
+            continue
         tp.attrib.update(grab)          # urutan skema: p-pr sebelum t-pr
-        moved += len(grab)
-    if not moved:
+        touched += len(grab)
+    if not touched:
         return None, 0
     for _, (prefix, uri) in ET.iterparse(io.BytesIO(styles_bytes),
                                          events=['start-ns']):
         ET.register_namespace(prefix, uri)
-    return ET.tostring(root, encoding='unicode').encode('utf-8'), moved
+    return ET.tostring(root, encoding='unicode').encode('utf-8'), touched
 
 
 def _repair_content(data):
@@ -448,6 +474,90 @@ def planted_heading_aligns(styles_xml):
             if align:
                 out[name] = align
     return out
+
+
+RE_TFM_SPAN = re.compile(
+    r'^(?:ec-|tc-|ts1-)?'
+    r'(ptm|phv|pcr|ppl|pbk|pag|pnc|pzc|cmr|cmbx|cmti|cmsl|cmtt|cmss|'
+    r'lmr|lmss|lmtt|ec|ntx|qtm|qhv|qcr)'
+    r'([a-z]*?)'
+    r'(?:8[tcr]|7t|6t)?'
+    r'(?:(\d+))?'
+    r'(?:-(?:x-x-(\d+))?)?$')
+
+
+def _inject_missing_tfm_span_styles(root, styles_bytes):
+    """ooffice.4ht membungkus tiap perubahan font LaTeX (\\large, \\bfseries,
+    \\itshape, \\small, \\ttfamily...) dalam <text:span text:style-name=
+    "ptmb8t-x-x-144"> — 900+ di skripsi uji — tapi TAK PERNAH mendefinisikan
+    style-nya di automatic-styles; style tak terdefinisi diabaikan
+    LibreOffice sehingga seluruh bold/italic/ukuran hasil LaTeX hilang
+    (judul cover tak bold-besar, \\small tabel jadi 12pt penuh).
+
+    Nama style = nama font TFM TeX (skema Berry + skala tex4ht):
+      ptmb8t-x-x-144 -> 14.4pt bold   ptmbi8t-x-x-144 -> bold+italic
+      ptmri8t-x-x-109 -> italic ~11pt  cmbx12 -> 12pt bold
+      ecrm1200 -> 12pt                 ecti1000 -> 10pt italic
+    Style family=text dibuatkan untuk semua nama yang DIPAKAI tapi belum
+    terdefinisi (di content.xml maupun styles.xml). Return jumlah dibuat.
+    Tanpa kandidat: TANPA perubahan apa pun (automatic-styles jangan
+    lahir kosong — dokumen tanpa marker harus byte-stabil)."""
+    defined = {st.get(f'{{{STYLE_NS}}}name')
+               for st in root.iter(f'{{{STYLE_NS}}}style')}
+    if styles_bytes:
+        defined.update(re.findall(r'style:name=["\']([^"\']+)["\']',
+                                  styles_bytes.decode('utf-8', 'ignore')))
+    used = {sp.get(f'{{{TEXT_NS}}}style-name')
+            for sp in root.iter(f'{{{TEXT_NS}}}span')}
+    cands = [nm for nm in sorted(used - defined - {None})
+             if RE_TFM_SPAN.match(nm)]
+    if not cands:
+        return 0
+    auto = root.find(f'{{{OFFICE_NS}}}automatic-styles')
+    if auto is None:
+        body = root.find(f'{{{OFFICE_NS}}}body')
+        if body is None:
+            return 0
+        auto = ET.Element(f'{{{OFFICE_NS}}}automatic-styles')
+        root.insert(list(root).index(body), auto)
+    added = 0
+    for nm in cands:
+        fam, variant, d1, d2 = RE_TFM_SPAN.match(nm).groups()
+        variant = variant or ''
+        is_bold = 'b' in variant or fam == 'cmbx'
+        is_italic = ('i' in variant or 'sl' in variant or
+                     fam in ('cmti', 'cmsl'))
+        sz = None
+        if d2:
+            sz = int(d2) / 10                    # skala tex4ht: 144 -> 14.4
+        elif d1:
+            val = int(d1)
+            if val >= 100:
+                sz = val / 100                   # EC: ecrm1200 -> 12
+            elif val >= 5:
+                sz = float(val)                  # cm/lm: cmbx12 -> 12
+        tp = {}
+        if is_bold:
+            tp[f'{{{FO_NS}}}font-weight'] = 'bold'
+            tp[f'{{{STYLE_NS}}}font-weight-asian'] = 'bold'
+            tp[f'{{{STYLE_NS}}}font-weight-complex'] = 'bold'
+        if is_italic:
+            tp[f'{{{FO_NS}}}font-style'] = 'italic'
+            tp[f'{{{STYLE_NS}}}font-style-asian'] = 'italic'
+            tp[f'{{{STYLE_NS}}}font-style-complex'] = 'italic'
+        if sz:
+            sz_pt = f'{sz:g}pt'
+            tp[f'{{{FO_NS}}}font-size'] = sz_pt
+            tp[f'{{{STYLE_NS}}}font-size-asian'] = sz_pt
+            tp[f'{{{STYLE_NS}}}font-size-complex'] = sz_pt
+        if fam in ('pcr', 'cmtt', 'lmtt', 'qcr'):
+            tp[f'{{{STYLE_NS}}}font-name'] = 'Courier New'
+        st = ET.SubElement(auto, f'{{{STYLE_NS}}}style', {
+            f'{{{STYLE_NS}}}name': nm,
+            f'{{{STYLE_NS}}}family': 'text'})
+        ET.SubElement(st, f'{{{STYLE_NS}}}text-properties', tp)
+        added += 1
+    return added
 
 
 def run(SRC, DST):
@@ -798,6 +908,12 @@ def run(SRC, DST):
     for sec in list(root.iter(f'{{{TEXT_NS}}}section')):
         wrap_orphans(sec)
 
+    # ---- pass E: style span TFM yang dipakai tapi tak terdefinisi ----
+    n_span = _inject_missing_tfm_span_styles(root, zin.read('styles.xml'))
+    if n_span:
+        print(f'[fix_odt] style span TFM dibuatkan: {n_span} '
+              f'(bold/italic/ukuran LaTeX dari nama font)')
+
     data = {n: zin.read(n) for n in zin.namelist()}
     zin.close()
     out = ET.tostring(root, encoding='unicode').encode('utf-8')
@@ -822,10 +938,11 @@ def run(SRC, DST):
           f'(drop: inline={stats["drop_inline"]} vs={stats["drop_vs"]}, '
           f'komentar={stats["comments"]}); {n_wrapped} inline yatim dibungkus '
           f'(jenis: {sorted(kinds)})')
-    if n_imgsize or n_eqtbl or n_font or n_mrow or n_lone_mo:
+    if n_imgsize or n_eqtbl or n_font or n_mrow or n_lone_mo or n_span:
         print(f'[fix_odt] repair: gambar ukuran LaTeX={n_imgsize}, '
               f'persamaan-list={n_eqtbl}, font heading={n_font}, '
-              f'mrow kosong={n_mrow}, mo tunggal={n_lone_mo}')
+              f'mrow kosong={n_mrow}, mo tunggal={n_lone_mo}, '
+              f'span TFM={n_span}')
 
 
 def _is_marker_only(par):
